@@ -1,0 +1,2201 @@
+#!/usr/bin/perl
+
+
+# kladmin -- User account administration tool for use with distributed file 
+#            systems based on MIT Kerberos V, OpenLDAP and OpenAFS.
+#
+# Version 0.1.1
+#
+# Written by Jaap Winius <jwinius@rjsystems.nl>
+# Copyright (c) 2010, Jaap Winius, RJ Systems, The Netherlands
+#
+# This package is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 dated June, 1991.
+#
+# This package is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this package; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
+# MA 02110-1301, USA.
+
+
+##############################################################################
+# Perl settings, modules
+##############################################################################
+
+use strict;
+use Getopt::Std;
+use File::Path;
+use File::Find;
+
+
+##############################################################################
+# Declarations
+##############################################################################
+
+my $CFG		= "/etc/kladmin.conf";			# kladmin configuration file
+
+my $KRBAUTH	= "/etc/krb5kdc/kadm5.acl";		# List of Kerberos administrative accounts
+my $AFSUSRLST	= "/etc/openafs/server/UserList";	# List of AFS administrative accounts
+my $THISCELL	= "/etc/openafs/ThisCell";		# File location with the name of the local AFS cell
+
+my $KAN		= "Kerberos acc.";			# Column label for Kerberos account names
+my $LAN		= "LDAP acc.";				# Column label for LDAP account names
+my $LAI		= "LDAP acc.";				# Column label for LDAP account UIDs
+my $LGN		= "LDAP grp.";				# Column label for LDAP group names
+my $LGI		= "LDAP grp.";				# Column label for LDAP group GIDs
+my $AAN		= "AFS acc.";				# Column label for AFS account names
+my $AAI		= "AFS acc.";				# Column label for AFS account IDs
+
+my $ID		= $ENV { uc "id" } || "id";			# Display the user's identity
+my $APG		= $ENV { uc "apg" } || "apg";			# Generates random passwords. Package 'apg' must be installed
+my $KADMIN	= $ENV { uc "kadmin.local" } || "kadmin.local";	# Local Kerberos V database administration program
+my $KLIST	= $ENV { uc "klist" } || "klist";		# Display cached Kerberos tickets
+my $AFSPTS	= $ENV { uc "pts" } || "pts";			# AFS Protection Server administration program
+my $AFSVOS	= $ENV { uc "vos" } || "vos";			# AFS Volume Server administration program
+my $AFSFS	= $ENV { uc "fs" } || "fs";			# AFS Cache Manager administration program
+my $AFSTOK	= $ENV { uc "tokens" } || "tokens";		# AFS util to display the locally cached tokens
+
+
+my %LDAP = ();
+
+for my $subCmd ( qw/ search add delete whoami / ) {		# LDAP utils
+
+        my $fullName = "ldap" . $subCmd;
+
+        $LDAP { $subCmd } = $ENV{ uc $fullName } || $fullName;
+}
+
+
+##############################################################################
+# Read configuration file
+##############################################################################
+
+my ( $APGARGS, $KRBOPT, $IDMIN, $LDPADMIN, $LDAPUPTH, $LDAPGPTH, $OBJCL, $AFSPRT, $AFSSRV, $AFSSRVRO, $AFSQUO, $AFSPRM, $CW );
+
+open Conf, "<$CFG" or die "Error: can't open configuration file, $CFG: $!\n";
+
+while (<Conf>) {
+
+	chomp;
+
+	if ( /^APGARGS\s+([\w-\s]+)$/ ) { $APGARGS = $1; }	# Arguments used for the apg tool
+	if ( /^KRBOPT\s+([\w-\+\s]+)$/ ) { $KRBOPT = $1; }	# Attributes to associate with Kerberos user accounts
+	if ( /^IDMIN\s+(\d+)$/ ) { $IDMIN = $1; }		# Minimum user/group ID number
+	if ( /^LDPADMIN\s+([\w+,=\s]+)$/ ) { $LDPADMIN = $1; }	# DN, or partial DN, required for LDAP administrative access
+	if ( /^LDAPUPTH\s+([\w+,=\s]+)$/ ) { $LDAPUPTH = $1; }	# LDAP user ou
+	if ( /^LDAPGPTH\s+([\w+,=\s]+)$/ ) { $LDAPGPTH = $1; }	# LDAP group ou
+	if ( /^OBJCL\s+(\w+)$/ ) { $OBJCL = $1; } 		# Structural object class type for LDAP UID entry
+	if ( /^AFSPRT\s+(\/[\w]+)$/ ) { $AFSPRT = $1; }		# AFS partition
+	if ( /^AFSSRV\s+(\w+)$/ ) { $AFSSRV = $1; }		# AFS server host name for read-write volumes
+	if ( /^AFSSRVRO\s+([\w\/\s]+)$/ ) { $AFSSRVRO = $1; }	# AFS server host names for read-only volumes
+	if ( /^AFSQUO\s+(\d+)$/ ) { $AFSQUO = $1; } 		# AFS user volume quota in KB
+	if ( /^AFSPRM\s+(\w+)$/ ) { $AFSPRM = $1; }		# AFS permissions for user in user volume
+	if ( /^CW\s+(\d+)$/ ) { $CW = $1; }			# Column width of the uname/ID list overviews
+}
+
+close Conf;
+
+
+##############################################################################
+# Default values
+##############################################################################
+
+unless ( $APGARGS ) { $APGARGS = "-a0 -m8 -Mncl"; }
+unless ( $KRBOPT ) { $KRBOPT = "-clearpolicy +requires_preauth"; }
+unless ( $IDMIN ) { $IDMIN = 10000; }
+unless ( $OBJCL ) { $OBJCL = "person"; }
+unless ( $AFSPRT ) { $AFSPRT = "/vicepa"; }
+unless ( $AFSQUO ) { $AFSQUO = 1048576; }
+unless ( $AFSPRM ) { $AFSPRM = "all"; }
+unless ( $CW ) { $CW = 15; }
+
+
+##############################################################################
+# Options 
+##############################################################################
+
+getopts ( "AaDf:G:Ii:klL:p:S:Uu:v" );
+
+our ( $opt_A, $opt_a, $opt_D, $opt_f, $opt_G, $opt_I, $opt_i, $opt_k, $opt_L, $opt_l, $opt_p, $opt_S, $opt_u, $opt_v );
+
+
+unless ( $opt_k || $opt_l || $opt_a ) { 
+
+	if ( $opt_A || $opt_D || $opt_f || $opt_I ) {
+
+		$opt_k = 1; $opt_l = 1; $opt_a = 1;
+	}
+}
+
+
+sub options {
+
+	print	"\nAccount administration tool for systems based on MIT Kerberos V, OpenLDAP and OpenAFS.
+		
+Usage: kladmin <options>
+		
+Options: -A: Add an account.
+	 -a: Specifies an AFS account.
+	 -D: Delete an account.
+	 -f: <file_name> for adding a list of accounts.
+	 -G: <given_name> of a new user.
+	 -I: Display information about an account.
+	 -i: <id_number> forces an ID number (if available) for a new account.
+	 -k: Specifies a Kerberos account.
+	 -L: <code> for producing lists of various names and ID numbers.
+	 -l: Specifies an LDAP account.
+	 -p: <password> for a Kerberos account (instead of a random password).
+	 -S: <surname> of a new user.
+	 -u: <user_name> of (or for) an account.
+	 -v: print version.
+		
+When applicable, all three account types (k, l and a) are assumed if none are specified.\n\n";
+
+	exit 0;
+}
+
+
+sub version {
+
+	print "kladmin v0.1\nCopyright (C) 2010 Jaap Winius, RJ Systems, The Netherlands\n";
+}
+
+
+##############################################################################
+# 1st level subroutines
+##############################################################################
+
+# Subroutine descriptions			   Sub name	Output name
+# 
+# Run external programs and return the output	-  genRunPrg	@genRunPrgOut
+# Get existing account names from Kerberos	-  krbGetUsr	@krbGetUsrLst
+# Get existing account names from LDAP		-  ldpGetUsr	@ldpGetUsrLst
+# Get existing account names from AFS		-  afsGetUsr	@afsGetUsrLst
+# Get LDAP posixAccount names and UID numbers	-  ldpGetPac	@ldpGetPacLst
+# Get LDAP posixGroup names and GID numbers	-  ldpGetPgr	@ldpGetPgrLst
+# Get AFC account names and ID numbers		-  afsGetAid	@afsGetAidLst
+# Determine if new account name is in use	-  genDetUsr	$---DetUsrOut
+# Get existing UID+GID numbers from LDAP	-  ldpGetIds	@ldpGetIdsLst
+# Get existing UID numbers from AFS		-  afsGetIds	@afsGetIdsLst
+# Determine lowest free ID number		-  genDetIds	$genDetIdsRes
+# Create new user account in Kerberos		-  krbAddUsr	$krbAddUsrOut
+# Create new user account in LDAP		-  ldpAddUsr	$ldpAddUsrOut
+# Create new user account in AFS		-  afsAddUsr	$afsAddUsrOut
+# Create new user volume in AFS			-  afsAddVol	$afsAddVolOut
+# Create new read-only user volumes in AFS	-  afsAddVro	$afsAddVroOut
+# Release new read-only user volumes in AFS	-  afsRelVro	$afsRelVroOut
+# Determine the name of the AFS cell		-  afsDetCel	$afsDetCelRes
+# Determine the required AFS subdirs		-  genDetDir	$genDetDirRes
+# Make AFS subdirs if needed			-  genAddDir	$genAddDirOut
+# Create new user volume mount point in AFS	-  afsAddMpt	$afsAddMptOut
+# Add user permissions to new AFS volume	-  afsAddPrm	$afsAddPrmOut
+# Delete user account in Kerberos		-  krbDelUsr	$krbDelUsrOut
+# Delete user account in OpenLDAP		-  ldpDelUsr	$ldpDelUsrOut
+# Delete user account in OpenAFS		-  afsDelUsr	$afsDelUsrOut
+# Delete a read-only user volume in AFS		-  afsRemSit	$afsRemSitOut
+# Delete user volume in OpenAFS			-  afsDelVol	$afsDelVolOut
+# Delete user mount point in OpenAFS		-  afsDelMpt	$afsDelMptOut
+# Check that we have root access to the OS	-  unxDetAth    -
+# Check that we have admin access to Kerberos	-  krbDetAth	-
+# Check that we have admin access to LDAP	-  ldpDetAth	-
+# Determine the ID no. of the local AFS token	-  afsGetTok	$afsGetTokRes
+# Get the list of AFS administrative accounts	-  afsGetAdm	@afsGetAdmLst
+# Use same ID for LDAP if AFS account exists	-  afsMatIds	$afsMatIdsRes
+# Use same ID for AFS if LDAP account exists	-  ldpMatIds	$ldpMatIdsRes
+# Generate random krb5 password if necessary	-  krbGenPwd	$krbGenPwdRes
+# Get info on individual Kerberos account	-  krbGetAcc	$krbGetAccOut
+# Get info on individual LDAP account		-  ldpGetAcc	$ldpGetAccOut
+# Get info on individual AFS user account	-  afsGetAcc	$afsGetAccOut
+# Get info on individual AFS user volume	-  afsGetVol	$afsGetVolOut
+# Get info on individual AFS user mount point	-  afsGetMpt	$afsGetMptOut
+# Get info on individual AFS user permissions	-  afsGetPrm	$afsGetPrmOut
+# Determine the replicas of an AFS user volume	-  afsDetVol	@afsDetVolLst
+# Create multiple Kerberos accounts from a file	-  krbCreUsr	$krbCreUsrOut
+# Create multiple OpenLDAP accounts from a file	-  ldpCreUsr	$ldpCreUsrOut
+# Create multiple OpenAFS  accounts from a file	-  afsCreUsr	$afsCreUsrOut
+
+
+sub genRunPrg {
+
+	my ( $prog, $args ) = @_;
+
+	my $pid = open ( INPUT, "-|" );
+
+	if ( not defined $pid ) {
+
+		die "cannot fork: $!\n";
+
+	} elsif ( $pid == 0 ) {
+
+		open ( STDERR, ">&STDOUT") or die "self: cannot dup stdout: $!\n";
+
+		if ( $args == 0 ) {
+
+			exec ( $prog ) or die "self: cannot run $prog: $!\n";
+
+		} else {
+
+			exec ( $prog, @$args ) or die "self: cannot run $prog @$args: $!\n";
+		}
+	}
+
+	my @output;
+
+	while ( <INPUT> ) {
+
+		push ( @output, $_ );
+	}
+
+	close INPUT;
+
+	return @output;
+}
+
+
+sub afsGetAdm {
+
+	my ( $userlist ) = @_;
+
+	open UList, "<$userlist" or die "Error: can't open $userlist: $!\n";
+
+	my @output; my $i = 0;
+
+	while ( <UList> ) {
+
+		if ( /^(\w+)\s*$/ ) { $output[$i] = "$1"; $i++; }
+	}
+
+	close UList;
+
+	if ( $i == 0 ) {
+
+		die "No entries found in $userlist!\n";
+
+	} else {
+
+		return @output;
+	}
+}
+
+
+sub krbGenPwd {
+
+	my ( $apg, $apgArgs ) = @_;
+
+	my @args = ( "-n1", $apgArgs );
+
+	my @genRunPrgOut = genRunPrg ( $apg, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		chomp;
+
+		push ( @output, $_ );
+	}
+
+	close INPUT;
+
+	return $output[0];
+}
+
+
+sub ldpMatIds {
+
+	my ( $ldapsearch, $userName ) = @_;
+
+	my @args = ( "-LLL", "uid=$userName" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	my $output = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /uidNumber:\s+(\d+)/ ) { $output = $1; last; }
+	}
+
+	return $output;
+}
+
+
+sub afsMatIds {
+
+	my ( $pts, $userName ) = @_;
+
+	my @args = ( "examine", "-nameorid", "$userName" );
+
+	my @genRunPrgOut = genRunPrg ( $pts, \@args );
+
+	my $output = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^Name:\s$userName,\sid:\s(\d+),\sowner:/ ) { $output = $1; }
+	}
+
+	return $output;
+}
+
+
+sub ldpDetAth {
+
+	my ( $ldapwhoami, $ldapauth ) = @_;
+
+	my @args = ( "-Q" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapwhoami, \@args );
+
+	my $output = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^dn:.*$ldapauth/ ) { $output = 1; }
+	}
+
+	if ( $output == 0 ) { die "Must have LDAP administrative access.\n"; }
+}
+
+
+sub afsDetCel {
+
+	my ( $cellFile ) = @_;
+
+	open Cell, "<$cellFile" or die "Error: can't open $cellFile: $!\n";
+
+	my $afsCell;
+
+	while ( <Cell> ) {
+
+		chomp;
+
+		if ( /^(.*)$/ ) { $afsCell = $1; }
+	}
+
+	close Cell;
+
+	return $afsCell;
+}
+
+
+sub krbDetAth {
+
+	my ( $klist, $authFile ) = @_;
+
+	my @args = ( "-5" );
+
+	my @genRunPrgOut = genRunPrg ( $klist, \@args );
+
+	open Auth, "<$authFile" or die "Error: can't open $authFile: $!\n";
+
+	my @auth; my $i = 0;
+
+	while ( <Auth> ) {
+
+		if ( /^([\*\/]*\w+)\s/ ) { $auth[$i] = "$1"; $i++; }
+	}
+
+	close Auth;
+
+	my $i = 0; my @admin;
+
+	foreach ( @auth ) {
+
+		s/\*/\\\*/;
+
+		s/\//\\\//;
+
+		if ( $i == 0 ) { $admin[$i] = $_; }
+
+		elsif ( $i > 0 ) { $admin[$i] = "|$_"; }
+
+		$i++;
+	}
+
+	my $output = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^Default principal:\s(@admin)\@/ ) { $output = 1; }
+	}
+
+	unless ( $output == 1 ) { die "Must have Kerberos administrative access.\n"; }
+}
+
+
+sub unxDetAth {
+
+	my ( $id ) = @_;
+
+	my @args = ( "-u" );
+
+	my @genRunPrgOut = genRunPrg ( $id, \@args );
+
+	foreach ( @genRunPrgOut ) {
+
+		unless ( $_ == 0 ) { die "Must run as root.\n"; }
+	}
+}
+
+
+sub genAddDir { 
+
+	my ( $dir ) = @_;
+
+	my $output;
+
+	if ( -d $dir ) {
+
+		$output = "Directory $dir already exists.\n";
+
+	} else {
+
+		mkpath( $dir, 0755 ) or die "Can't create directory $dir\n";
+
+		$output = "Created new directory $dir\n"
+	}
+
+	return $output;
+}
+
+
+sub genDelDir { 
+
+	my ( $dir ) = @_;
+
+	my ( $output, $dl1, $dl2, $dl3, $dl4, $dl5 );
+
+	if ( -d $dir ) {
+
+		for ( $dir ) {
+
+			if ( /^\/(\w+)\/([\w+\.]+)\/(\w+)\/(\w+)\/(\w+)$/ ) { 
+
+				$dl1 = $1; $dl2 = $2; $dl3 = $3; $dl4 = $4; $dl5 = $5;
+			}
+		}
+
+		chdir "/$dl1/$dl2/$dl3/$dl4";
+
+		finddepth( sub{ rmdir }, "." );
+
+		chdir "/$dl1/$dl2/$dl3";
+
+		finddepth( sub{ rmdir }, "." );
+
+		if ( -d "/$dl1/$dl2/$dl3/$dl4" ) {
+
+			if ( -d "/$dl1/$dl2/$dl3/$dl4/$dl5" ) {
+
+				$output = "Directory $dl1/$dl2/$dl3/$dl4/$dl5 not deleted.\n";
+
+			} else {
+
+				$output = "Directory $dl1/$dl2/$dl3/$dl4/$dl5 deleted, but not $dl1/$dl2/$dl3/$dl4\n";
+			}
+
+		} else {
+
+			$output = "Directory $dl1/$dl2/$dl3/$dl4 deleted.\n";
+		}
+
+	} else {
+
+		$output = "Non-existent directory $dir not deleted.\n";
+	}
+
+	return $output;
+}
+
+
+sub genDetDir { 
+
+	my ( $userName, $afsCell ) = @_;
+
+	my $output;
+
+	for ( $userName ) {
+
+		if ( /^(\w)(\w)\w+$/ ) { $output = "/afs/$afsCell/user/$1/$1$2"; }
+	}
+
+	return $output;
+}
+
+
+sub genDetUsr { 
+
+	my ( $userList, $userName ) = @_;
+
+	my $output;
+
+	foreach ( @$userList ) {
+
+		if ( $_ eq $userName ) { $output = 1; }
+	}
+
+	return $output;
+}
+
+
+sub genDetIds { 
+
+	my ( $idList, $idMin ) = @_;
+
+	my ( @sortedIdLst, $output );
+
+	@sortedIdLst = sort ( @$idList );
+
+	while ( $idMin < 65535 ) { 
+
+		foreach ( @sortedIdLst ) {
+
+			next if ( $_ < $idMin );
+
+			last if ( $_ == $idMin );
+
+			$output = $idMin;
+		}
+
+		last if ( $output != undef );
+
+		$idMin++;
+	}
+
+	return $output;
+}
+
+
+sub ldpGetIds {
+
+	my ( $ldapsearch ) = @_;
+
+	my @args = ( "-LLL", "uidNumber", "gidNumber" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^(g|u)idNumber:\s(\d+)$/ ) { push ( @output, $2 ); }
+	}
+
+	return @output;
+}
+
+
+sub afsGetIds {
+
+	my ( $pts ) = @_;
+
+	my @args = ( "listentries" );
+
+	my @genRunPrgOut = genRunPrg ( $pts, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^\w+\s+(\d+)\s+/ ) { push ( @output, $1 ); }
+	}
+
+	return @output;
+}
+
+
+sub afsGetTok {
+
+	my ( $tokens ) = @_;
+
+	my $args = 0;
+
+	my @genRunPrgOut = genRunPrg ( $tokens, $args );
+
+	my $output = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^User\'s\s\(AFS\sID\s(\d+)\)\stokens\s/ ) { $output = $1; }
+	}
+
+	if ( $output == 0 ) { 
+
+		die "AFS token required.\n"; 
+
+	} else {
+
+		return $output;
+	}
+}
+
+
+sub afsGetAcc {
+
+	my ( $pts, $userName ) = @_;
+
+	my @args = ( "examine", "-nameorid", "$userName" );
+
+	my @genRunPrgOut = genRunPrg ( $pts, \@args );
+
+	unshift ( @genRunPrgOut, "\n" );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub ldpGetPac {
+
+	my ( $ldapsearch ) = @_;
+
+	my @args = ( "-Q", "-LLL", "objectClass=posixAccount" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	my @output; my $x = 0; my $y = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^uid:\s(\w+)$/ ) { $output[$x][$y] = $1; $y++; }
+
+		if ( /^uidNumber:\s(\d+)$/ ) { $output[$x][$y] = $1; $x++; $y = 0; }
+	}
+
+	return @output;
+}
+
+
+sub ldpGetPgr {
+
+	my ( $ldapsearch ) = @_;
+
+	my @args = ( "-Q", "-LLL", "objectClass=posixGroup" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	my @output; my $x = 0; my $y = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^cn:\s(\w+)$/ ) { $output[$x][$y] = $1; $y++; }
+
+		if ( /^gidNumber:\s(\d+)$/ ) { $output[$x][$y] = $1; $x++; $y = 0; }
+	}
+
+	return @output;
+}
+
+
+sub ldpGetUsr {
+
+	my ( $ldapsearch ) = @_;
+
+	my @args = ( "-Q", "-LLL", "uid=*" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^uid:\s(\w+)$/ ) { push ( @output, $1 ); }
+	}
+
+	return @output;
+}
+
+
+sub afsGetUsr {
+
+	my ( $pts ) = @_;
+
+	my @args = ( "listentries" );
+
+	my @genRunPrgOut = genRunPrg ( $pts, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^(\w+)\s+\d+\s+/ ) { push ( @output, $1 ); }
+	}
+
+	return @output;
+}
+
+
+sub afsGetAid {
+
+	my ( $pts ) = @_;
+
+	my @args = ( "listentries" );
+
+	my @genRunPrgOut = genRunPrg ( $pts, \@args );
+
+	my @output; my $x = 0; my $y = 0;
+
+	foreach ( @genRunPrgOut ) {
+
+		next if ( /^Name\s+ID\s+Owner\s+Creator$/ );
+
+		if ( /^(\w+)\s+\d+\s+/ ) { $output[$x][$y] = $1; $y++; }
+
+		if ( /^\w+\s+(\d+)\s+/ ) { $output[$x][$y] = $1; $x++; $y = 0; }
+	}
+
+	return @output;
+}
+
+
+sub afsDetVol {
+
+	my ( $volinfo ) = @_;
+
+	my @input = split ( /\n/, $volinfo );
+
+	my @output;
+
+	foreach ( @input ) {
+
+		if ( /^\s+server\s([\w+\.]+)\spartition\s(\/\w+)\s(RO|RW)\sSite/ ) {
+
+			push ( @output, "$1 $2 $3" );
+		}
+	}
+
+	return @output;
+}
+
+
+sub krbGetUsr {
+
+	my ( $kadminlocal ) = @_;
+
+	my @args = ( "-q", "listprincs" );
+
+	my @genRunPrgOut = genRunPrg ( $kadminlocal, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^self: cannot / ) { s/^self: //; die $_; }
+
+		unless ( /Authenticating as principal/ ) { 
+
+			if ( /^(.*)@/ ) { push ( @output, $1 ); }
+		}
+	}
+	
+	return @output;
+}
+
+
+sub krbGetAcc {
+
+	my ( $kadminlocal, $uname ) = @_;
+
+	my @args = ( "-q", "getprinc $uname" );
+
+	my @genRunPrgOut = genRunPrg ( $kadminlocal, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^self: cannot / ) { s/^self: //; die $_; }
+
+		push ( @output, $_ ) unless /Authenticating as principal/;
+	}
+
+	unshift ( @output, "\n" );
+
+	return wantarray ? @output : join ( "", @output );
+}
+
+
+sub krbDelUsr {
+
+	my ( $kadminlocal, $uname ) = @_;
+
+	my @args = ( "-q", "delprinc -force $uname" );
+
+	my @genRunPrgOut = genRunPrg ( $kadminlocal, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^self: cannot / ) { s/^self: //; die $_; }
+
+		push ( @output, $_ ) unless /Authenticating as principal/;
+	}
+
+	return wantarray ? @output : join ( "", @output );
+}
+
+
+sub krbAddUsr {
+
+	my ( $kadminlocal, $uname, $passw, $krbOpt ) = @_;
+
+	my @args = ( "-q", "addprinc -pw $passw $krbOpt $uname" );
+
+	my @genRunPrgOut = genRunPrg ( $kadminlocal, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) {
+
+		if ( /^self: cannot / ) { s/^self: //; die $_; }
+
+		push ( @output, $_ ) unless /Authenticating as principal/;
+	}
+
+	return wantarray ? @output : join ( "", @output );
+}
+
+
+sub afsAddUsr {
+
+	my ( $pts, $uname, $id ) = @_;
+
+	my @args = ( "createuser", "-name", $uname, "-id", $id );
+
+	my @genRunPrgOut = genRunPrg ( $pts, \@args );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsDelUsr {
+
+	my ( $pts, $uname ) = @_;
+
+	my @args = ( "delete", "-nameorid", $uname, -force );
+
+	my @genRunPrgOut = genRunPrg ( $pts, \@args );
+
+	return "Deleted AFS user \"$uname\"\n" if ( @genRunPrgOut == undef );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsGetVol {
+
+	my ( $vos, $uname ) = @_;
+
+	my @args = ( "examine", "-id", "user.$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $vos, \@args );
+
+	unshift ( @genRunPrgOut, "\n" );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsAddVol {
+
+	my ( $vos, $uname, $srv, $part, $quo ) = @_; 
+
+	my @args = ( "create", "-server", $srv, "-partition", $part, "-name", "user.$uname", "-maxquota", $quo );
+
+	my @genRunPrgOut = genRunPrg ( $vos, \@args );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsAddVro {
+
+	my ( $vos, $uname, $spl ) = @_; 
+
+	my @srvprtlst = split /" "/, $spl;
+
+	my @output;
+
+	foreach ( @srvprtlst ) {
+
+		my ( $srv, $part );
+
+		if ( /(\w+)(\/\w+)/ ) { $srv = $1; $part = $2; } else { next; }
+
+		my @args = ( "addsite", "-server", $srv, "-partition", $part, "-id", "user.$uname" );
+
+		my @genRunPrgOut = genRunPrg ( $vos, \@args );
+
+		foreach ( @genRunPrgOut ) {
+
+			push ( @output, $_ );
+		}
+	}
+
+	return wantarray ? @output : join ( "", @output );
+}
+
+
+sub afsRemSit {
+
+	my ( $vos, $uname, $srvprtro ) = @_;
+
+	my ( $srv, $part );
+
+	for ( $srvprtro ) { 
+
+		if ( /^([\w]+)[\w\.]+\s(\/\w+)\sRO$/ ) {
+
+			$srv = $1; $part = $2;
+		}
+	}
+
+	my @args = ( "remsite", "-server", $srv, "-partition", $part, "-id", "user.$uname.readonly" );
+
+	my @genRunPrgOut = genRunPrg ( $vos, \@args );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsRelVro {
+
+	my ( $vos, $uname ) = @_;
+
+	my @args = ( "release", "-id", "user.$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $vos, \@args );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsDelVol {
+
+	my ( $vos, $uname, $srvprtro ) = @_;
+
+	my ( $srv, $part );
+
+	for ( $srvprtro ) { 
+
+		if ( /^([\w]+)[\w\.]*\s(\/\w+)\sRW$/ ) {
+
+			$srv = $1; $part = $2;
+
+		} elsif ( /^([\w]+)[\w\.]*\s(\/\w+)\sRO$/ ) {
+
+			$srv = $1; $part = "$2"; $uname = "$uname.readonly";
+		}
+	}
+
+	my @args = ( "remove", "-server", $srv, "-partition", $part, "-id", "user.$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $vos, \@args );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsGetMpt {
+
+	my ( $fs, $uname, $dir ) = @_;
+
+	unless ( -d "$dir/$uname" ) { return "\nDirectory or mount point $dir/$uname does not exist.\n"; }
+
+	my @args = ( "lsmount", "-dir", "$dir/$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $fs, \@args );
+
+	unshift ( @genRunPrgOut, "\n" );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsAddMpt {
+
+	my ( $fs, $uname, $dir ) = @_;
+
+	if ( -d "$dir/$uname" ) { return "Directory or mount point $dir/$uname already exists.\n"; }
+
+	my @args = ( "mkmount", "-dir", "$dir/$uname", "-vol", "user.$uname", "-rw" );
+
+	my @genRunPrgOut = genRunPrg ( $fs, \@args );
+
+	return "Created AFS mount point $dir/$uname\n" if ( @genRunPrgOut == undef );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsDelMpt {
+
+	my ( $fs, $uname, $dir ) = @_;
+
+	my @args = ( "rmmount", "-dir", "$dir/$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $fs, \@args );
+
+	return "Deleted AFS mount point $dir/$uname\n" if ( @genRunPrgOut == undef );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsAddPrm {
+
+	my ( $fs, $uname, $dir, $prm ) = @_;
+
+	unless ( -d "$dir/$uname" ) { die "Directory or mount point $dir/$uname does not exist.\n"; }
+
+	my @args = ( "setacl", "-dir", "$dir/$uname", "-acl", $uname, "all" );
+
+	my @genRunPrgOut = genRunPrg ( $fs, \@args );
+
+	return "Granted permission \"$prm\" to user \"$uname\" for AFS volume $dir/$uname\n" if ( @genRunPrgOut == undef );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub afsGetPrm {
+
+	my ( $fs, $uname, $dir ) = @_;
+
+	unless ( -d "$dir/$uname" ) { return "\nNo AFS permissions for non-existent directory $dir/$uname\n"; }
+
+	my @args = ( "listacl", "-path", "$dir/$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $fs, \@args );
+
+	unshift ( @genRunPrgOut, "\n" );
+
+	return wantarray ? @genRunPrgOut : join ( "", @genRunPrgOut );
+}
+
+
+sub ldpAddUsr {
+
+	my ( $ldapadd, $uname, $id, $dir, $gname, $sname ) = @_;
+
+	if ( $gname eq undef ) { $gname = "Given name"; }
+
+	if ( $sname eq undef ) { $sname = "Surname"; }
+
+	my @ldif; my $i = 0; 
+
+	$ldif[$i] = "dn: cn=$uname,$LDAPGPTH\n"; $i++;
+	$ldif[$i] = "cn: $uname\n"; $i++;
+	$ldif[$i] = "gidNumber: $id\n"; $i++;
+	$ldif[$i] = "objectClass: top\n"; $i++;
+	$ldif[$i] = "objectClass: posixGroup\n"; $i++;
+	$ldif[$i] = "\n"; $i++;
+	$ldif[$i] = "dn: uid=$uname,$LDAPUPTH\n"; $i++;
+	$ldif[$i] = "objectClass: top\n"; $i++;
+	$ldif[$i] = "objectClass: $OBJCL\n"; $i++;
+	$ldif[$i] = "objectClass: posixAccount\n"; $i++;
+	$ldif[$i] = "uid: $uname\n"; $i++;
+	$ldif[$i] = "uidNumber: $id\n"; $i++;
+	$ldif[$i] = "gidNumber: $id\n"; $i++;
+	$ldif[$i] = "cn: $gname\n"; $i++;
+	$ldif[$i] = "sn: $sname\n"; $i++;
+	$ldif[$i] = "loginShell: /bin/bash\n"; $i++;
+	$ldif[$i] = "homeDirectory: $dir/$uname\n"; $i++;
+	$ldif[$i] = "userPassword: {CRYPT}*\n"; $i++;
+	$ldif[$i] = "\n"; $i++;
+
+	my $random = int( rand 65536 ) + 1;
+
+	my $fileName = "/tmp/$random.ldif";
+
+	open ( LDIF, "+>$fileName" ) or die "Error: can't open $fileName: $!\n";
+
+	print LDIF @ldif;
+
+	close LDIF;
+
+	my @args = ( "-Q", "-f", $fileName );
+
+	my @genRunPrgOut = genRunPrg ( $ldapadd, \@args );
+
+	unlink "$fileName" or die "self: cannot remove $fileName: $!\n";
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) { 
+
+		unless ( /^$/ ) { push ( @output, $_ ); }
+	} 
+
+	return wantarray ? @output : join ( "", @output );
+}
+
+
+sub ldpDelUsr {
+
+	my ( $ldapsearch, $ldapdelete, $uname ) = @_;
+
+	my @args = ( "-Q", "-LLL", "cn=$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	my @output;
+
+	foreach (@genRunPrgOut ) { 
+
+		if ( /^dn:\s(cn=.*)$/ ) { push ( @output, $1 ); }
+	} 
+
+	my @args = ( "-Q", "-LLL", "uid=$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	foreach (@genRunPrgOut ) { 
+
+		if ( /^dn:\s(uid=.*)$/ ) { push ( @output, $1 ); }
+	} 
+
+	if ( @output == undef ) { return "\nNo LDAP entries found for user \"$uname\"\n"; }
+
+	foreach my $pt ( @output ) {
+
+		@args = ( "-Q", $pt );
+
+		my @genRunPrgOut = undef;
+
+		@genRunPrgOut = genRunPrg ( $ldapdelete, \@args );
+
+		if ( @genRunPrgOut == undef ) { 
+
+			print "deleting old entry \"$pt\"\n"; 
+
+		} else {
+
+			print "Error deleting LDAP entry \"$pt\": ";
+
+			foreach ( @genRunPrgOut ) {
+
+				print "$_\n";
+			}
+		}
+	}
+}
+
+
+sub ldpGetAcc {
+
+	my ( $ldapsearch, $uname ) = @_;
+
+	my @args = ( "-Q", "-LLL", "cn=$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	my @output;
+
+	foreach ( @genRunPrgOut ) { 
+
+		push ( @output, $_ );
+	} 
+
+	my @args = ( "-Q", "-LLL", "uid=$uname" );
+
+	my @genRunPrgOut = genRunPrg ( $ldapsearch, \@args );
+
+	foreach ( @genRunPrgOut ) { 
+
+		push ( @output, $_ );
+	} 
+
+	if ( @output == undef ) { return "\nNo LDAP entries found for user \"$uname\"\n"; }
+
+	pop @output;
+
+	unshift ( @output, "\n" );
+
+	return wantarray ? @output : join ( "", @output );
+}
+
+
+##############################################################################
+# 2nd level subroutines
+##############################################################################
+
+# Subroutine descriptions			   Sub name	Output name
+# 
+# Create a list of all account names in use	-  genGetUsr	@genGetUsrLst
+# Create a list of all ID no.'s in use		-  genGetIds	@genGetIdsLst
+# Check that we have admin access to AFS	-  afsDetAth	-
+# General authorization check			-  genDetAth	-
+
+
+sub genGetUsr {
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
+
+	my @afsGetUsrLst = afsGetUsr ( $AFSPTS );
+
+	my ( $item, %seen, @output );
+
+	foreach $item ( @krbGetUsrLst, @ldpGetUsrLst, @afsGetUsrLst ) {
+
+		push ( @output, $item ) unless $seen { $item }++;
+	}
+
+	return @output;
+}
+
+
+sub genGetIds {
+
+	my @ldpGetIdsLst = ldpGetIds ( $LDAP { search } );
+
+	my @afsGetIdsLst = afsGetIds ( $AFSPTS );
+
+	my ( $item, %seen, @output );
+
+	foreach $item ( @ldpGetIdsLst, @afsGetIdsLst ) {
+
+		push ( @output, $item ) unless $seen { $item }++;
+	}
+
+	return @output;
+}
+
+
+sub afsDetAth {
+
+	my $afsGetTokRes = afsGetTok ( $AFSTOK );
+
+	my @afsGetAdmLst = afsGetAdm ( $AFSUSRLST );
+
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	my $name; my $n = 0;
+
+	foreach ( @afsGetAidLst ) {
+
+		foreach my $val ( @$_ ) {
+
+			if ( $val !~ /\d+/ ) { $name = $val; }
+
+			if ( $val =~ /\d+/ && $val == $afsGetTokRes ) { 
+
+				foreach ( @afsGetAdmLst ) {
+
+					if ( $_ eq $name ) { $n = 1; }
+				}
+			}
+		}
+
+		last if ( $n == 1 );
+	}
+
+	if ( $n == 0 ) { die "AFS administrative access required.\n"; }
+}
+
+
+sub genDetAth {
+
+	unxDetAth ( $ID ) if ( $opt_k || $opt_a || $opt_L );
+
+	krbDetAth ( $KLIST, $KRBAUTH ) if ( $opt_k || $opt_L );
+
+	ldpDetAth ( $LDAP { whoami }, $LDPADMIN ) if ( $opt_l || $opt_L );
+
+	afsDetAth if ( $opt_a || $opt_L );
+}
+
+
+##############################################################################
+# 3rd level subroutines
+##############################################################################
+
+# Subroutine descriptions			   Sub name
+# 
+# Add user accounts				-  genAddUsr
+# Delete user accounts				-  genDelUsr
+# Show information about a user account		-  genInfUsr
+# Read a file and add users from a list		-  readFile
+# Routine to create two mid col. of ID no.'s	-  matchPrnMidColID
+# Create list based on Kerberos account names	-  listKrbAccNames
+# Create list based on LDAP account names	-  listLdpAccNames
+# Create list based on AFS account names	-  listAfsAccNames
+# Create list based on LDAP group names		-  listLdpGrpNames
+# Routine to create two mid col. of acc. names	-  matchPrnMidColName
+# Create list based on LDAP account UID no.'s	-  listLdpAccIDs
+# Create list based on AFS account ID no.'s	-  listAfsAccIDs
+# Create list based on LDAP group acc. no.'s	-  listLdpGrpIDs
+# Create a list of all names in use		-  listAllNames
+# Create a list of all ID/UID/GID no.'s in use	-  listAllIDs
+
+
+sub genAddUsr {
+
+	genDetAth;
+
+	if ( $opt_i ) { 
+
+		my @genGetIdsLst = genGetIds;
+
+		foreach ( @genGetIdsLst ) { 
+
+			if ( $_ == $opt_i ) { print "ID number already in use\n"; exit 0; }
+		}
+	}
+
+	if ( $opt_k ) {
+
+		my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+		my $krbDetUsrOut = genDetUsr ( \@krbGetUsrLst, $opt_u );
+
+		if ( $krbDetUsrOut == 1 ) { 
+
+			print "Kerberos account \"$opt_u\" already exists.\n"; 
+
+		} else {
+
+			if ( $opt_p ) {
+
+				my $krbAddUsrOut = krbAddUsr ( $KADMIN, $opt_u, $opt_p, $KRBOPT ); 
+
+				print $krbAddUsrOut;
+
+			} else {
+
+				my $krbGenPwdRes = krbGenPwd ( $APG, $APGARGS);
+
+				my $krbAddUsrOut = krbAddUsr ( $KADMIN, $opt_u, $krbGenPwdRes, $KRBOPT ); 
+
+				print "$krbAddUsrOut"; 
+
+				print "Password: $krbGenPwdRes\n";
+			}
+		}
+	}
+
+	if ( $opt_l ) {
+
+		my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
+
+		my $ldpDetUsrOut = genDetUsr ( \@ldpGetUsrLst, $opt_u );
+
+		if ( $ldpDetUsrOut == 1 ) {
+
+			print "LDAP account \"$opt_u\" already exists.\n";
+
+		} else {
+
+			my $afsMatIdsRes = afsMatIds ( $AFSPTS, $opt_u );
+
+			my ( @genGetIdsLst, $genDetIdsRes );
+
+			if ( $opt_i ) {
+
+				$genDetIdsRes = $opt_i;
+
+			} elsif ( $afsMatIdsRes == 0 ) {
+
+				@genGetIdsLst = genGetIds;
+
+				$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+
+			} else {
+
+				$genDetIdsRes = $afsMatIdsRes;
+			}
+
+			my $afsDetCelRes = afsDetCel ( $THISCELL );
+
+			my $genDetDirRes = genDetDir ( $opt_u, $afsDetCelRes );
+
+			my $ldpAddUsrOut = ldpAddUsr ( $LDAP { add }, $opt_u, $genDetIdsRes, $genDetDirRes, $opt_G, $opt_S ); 
+
+			print $ldpAddUsrOut;
+		}
+	}
+
+	if ( $opt_a ) {
+
+		my $afsDetCelRes = afsDetCel ( $THISCELL );
+
+		my $genDetDirRes = genDetDir ( $opt_u, $afsDetCelRes );
+
+		my @afsGetUsrLst = afsGetUsr ( $AFSPTS );
+
+		my $afsDetUsrOut = genDetUsr ( \@afsGetUsrLst, $opt_u );
+
+		if ( $afsDetUsrOut == 1 ) {
+
+			print "AFS account \"$opt_u\" already exists.\n";
+
+		} else {
+
+			my $ldpMatIdsRes = ldpMatIds ( $LDAP { search }, $opt_u );
+
+			my ( @genGetIdsLst, $genDetIdsRes );
+
+			if ( $opt_i ) {
+
+				$genDetIdsRes = $opt_i;
+
+			} elsif ( $ldpMatIdsRes == undef ) {
+
+				@genGetIdsLst = genGetIds;
+
+				$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+
+			} else {
+
+				$genDetIdsRes = $ldpMatIdsRes;
+			}
+
+			my $afsAddUsrOut = afsAddUsr ( $AFSPTS, $opt_u, $genDetIdsRes ); print $afsAddUsrOut;
+
+			my $afsAddVolOut = afsAddVol ( $AFSVOS, $opt_u, $AFSSRV, $AFSPRT, $AFSQUO ); print $afsAddVolOut;
+
+			my $afsAddVroOut = afsAddVro ( $AFSVOS, $opt_u, $AFSSRVRO ); print $afsAddVroOut;
+
+			my $afsRelVroOut = afsRelVro ( $AFSVOS, $opt_u ); print $afsRelVroOut;
+
+			my $genAddDirOut = genAddDir ( $genDetDirRes ); print $genAddDirOut;
+
+			my $afsAddMptOut = afsAddMpt ( $AFSFS, $opt_u, $genDetDirRes ); print $afsAddMptOut;
+
+			my $afsAddPrmOut = afsAddPrm ( $AFSFS, $opt_u, $genDetDirRes, $AFSPRM ); print $afsAddPrmOut;
+		}
+	}
+}
+
+
+sub genDelUsr {
+
+	genDetAth;
+
+	if ( $opt_k ) { 
+
+		my $krbDelUsrOut = krbDelUsr ( $KADMIN, $opt_u ); print $krbDelUsrOut;
+	}
+
+	if ( $opt_l ) {
+
+		my $ldpDelUsrOut = ldpDelUsr ( $LDAP { search }, $LDAP { delete }, $opt_u ); print $ldpDelUsrOut;
+	}
+
+	if ( $opt_a ) {
+
+		my $afsDetCelRes = afsDetCel ( $THISCELL );
+
+		my $genDetDirRes = genDetDir ( $opt_u, $afsDetCelRes );
+
+		my $afsGetVolOut = afsGetVol ( $AFSVOS, $opt_u );
+
+		my @afsDetVolLst = afsDetVol ( $afsGetVolOut );
+
+		my $afsDelMptOut = afsDelMpt ( $AFSFS, $opt_u, $genDetDirRes ); print $afsDelMptOut;
+
+		my $genDelDirOut = genDelDir ( $genDetDirRes ); print $genDelDirOut;
+
+		foreach ( @afsDetVolLst ) {
+
+			if ( /\sRO$/ ) { 
+
+				my $x = $_; my $y = $opt_u;
+
+				my $afsRemSitOut = afsRemSit ( $AFSVOS, $y, $x ); print $afsRemSitOut;
+
+				my $afsDelVolOut = afsDelVol ( $AFSVOS, $y, $x ); print $afsDelVolOut;
+			}
+		}
+
+		foreach ( @afsDetVolLst ) {
+
+			if ( /\sRW$/ ) {
+
+				my $afsDelVolOut = afsDelVol ( $AFSVOS, $opt_u, $_ ); print $afsDelVolOut;
+			}
+		}
+
+		my $afsDelUsrOut = afsDelUsr ( $AFSPTS, $opt_u ); print $afsDelUsrOut;
+	}
+}
+
+
+sub genInfUsr {
+
+	genDetAth;
+
+	if ( $opt_k ) {
+
+		my $krbGetAccOut = krbGetAcc ( $KADMIN, $opt_u ); print $krbGetAccOut;
+	}
+
+	if ( $opt_l ) {
+
+		my $ldpGetAccOut = ldpGetAcc ( $LDAP { search }, $opt_u ); print $ldpGetAccOut;
+	}
+
+	if ( $opt_a ) {
+
+		my $afsGetAccOut = afsGetAcc ( $AFSPTS, $opt_u ); print $afsGetAccOut;
+
+		my $afsGetVolOut = afsGetVol ( $AFSVOS, $opt_u ); print $afsGetVolOut;
+
+		my $afsDetCelRes = afsDetCel ( $THISCELL );
+
+		my $genDetDirRes = genDetDir ( $opt_u, $afsDetCelRes );
+
+		my $afsGetMptOut = afsGetMpt ( $AFSFS, $opt_u, $genDetDirRes ); print $afsGetMptOut;
+
+		my $afsGetPrmOut = afsGetPrm ( $AFSFS, $opt_u, $genDetDirRes ); print $afsGetPrmOut;
+	}
+
+	print "\n";
+}
+
+
+sub readFile {
+
+	genDetAth;
+
+	open AccList, "<$opt_f" or die "Error: can't open file, $opt_f: $!\n";
+
+	my @accList;
+
+	while ( <AccList> ) { 
+
+		chomp;
+
+		next if ( /^\s*#*$/ );
+
+		push ( @accList, $_ ); }
+
+	close AccList;
+
+	if ( @accList == undef ) { print "File is empty.\n"; exit 0; }
+
+	my $fileName = "$opt_f.out";
+
+	open ( PWD, ">>$fileName" ) or die "Error: can't open $fileName: $!\n";
+
+	my ( $uname, $gname, $sname );
+
+	foreach ( @accList ) { 
+
+		if ( /^\s*(\w+)\s*$/ || /^(\w+)\s+\"([\w-\s]+)\"\s+([\w-\s]+)\s*$/ || /^(\w+)\s+([\w-]+)\s+([\w-\s]+)\s*$/ ) { 
+
+			$uname = $1; $gname = $2; $sname = $3;
+
+			if ( $opt_k ) {
+
+				my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+				my $krbDetUsrOut = genDetUsr ( \@krbGetUsrLst, $uname );
+
+				if ( $krbDetUsrOut == 1 ) { 
+
+					print "\nKerberos account \"$uname\" already exists.\n"; 
+
+					print PWD "\nKerberos account \"$uname\" already exists.\n";
+
+				} else {
+
+					my $krbGenPwdRes = krbGenPwd ( $APG, $APGARGS );
+
+					my $krbAddUsrOut = krbAddUsr ( $KADMIN, $uname, $krbGenPwdRes, $KRBOPT ); 
+
+					print "\n$krbAddUsrOut"; 
+
+					print PWD "\n$krbAddUsrOut"; 
+
+					print "Password: $krbGenPwdRes\n";
+
+					print PWD "Password: $krbGenPwdRes\n";
+				}
+
+			}
+
+			if ( $opt_l ) {
+
+				my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
+
+				my $ldpDetUsrOut = genDetUsr ( \@ldpGetUsrLst, $uname );
+
+				if ( $ldpDetUsrOut == 1 ) {
+
+					print "LDAP account \"$uname\" already exists.\n";
+
+					print PWD "LDAP account \"$uname\" already exists.\n";
+
+				} else {
+
+					my $afsMatIdsRes = afsMatIds ( $AFSPTS, $uname );
+
+					my ( @genGetIdsLst, $genDetIdsRes );
+
+					if ( $afsMatIdsRes == 0 ) {
+
+						@genGetIdsLst = genGetIds;
+
+						$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+
+					} else {
+
+						$genDetIdsRes = $afsMatIdsRes;
+					}
+
+					my $afsDetCelRes = afsDetCel ( $THISCELL );
+
+					my $genDetDirRes = genDetDir ( $uname, $afsDetCelRes );
+
+					my $ldpAddUsrOut = ldpAddUsr ( $LDAP { add }, $uname, $genDetIdsRes, $genDetDirRes, $gname, $sname ); 
+
+					print $ldpAddUsrOut;
+
+					print PWD $ldpAddUsrOut;
+				}
+			}
+
+			if ( $opt_a ) {
+
+				my $afsDetCelRes = afsDetCel ( $THISCELL );
+
+				my $genDetDirRes = genDetDir ( $uname, $afsDetCelRes );
+
+				my @afsGetUsrLst = afsGetUsr ( $AFSPTS );
+
+				my $afsDetUsrOut = genDetUsr ( \@afsGetUsrLst, $uname );
+
+				if ( $afsDetUsrOut == 1 ) {
+
+					print "AFS account \"$uname\" already exists.\n";
+
+					print PWD "AFS account \"$uname\" already exists.\n";
+
+				} else {
+
+					my $ldpMatIdsRes = ldpMatIds ( $LDAP { search }, $uname );
+
+					my ( @genGetIdsLst, $genDetIdsRes );
+
+					if ( $ldpMatIdsRes == undef ) {
+
+						@genGetIdsLst = genGetIds;
+
+						$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+
+					} else {
+
+						$genDetIdsRes = $ldpMatIdsRes;
+					}
+
+					my $afsAddUsrOut = afsAddUsr ( $AFSPTS, $uname, $genDetIdsRes ); 
+
+					print $afsAddUsrOut;
+
+					print PWD $afsAddUsrOut;
+
+					my $afsAddVolOut = afsAddVol ( $AFSVOS, $uname, $AFSSRV, $AFSPRT, $AFSQUO ); 
+
+					print $afsAddVolOut;
+
+					print PWD $afsAddVolOut;
+
+					my $afsAddVroOut = afsAddVro ( $AFSVOS, $opt_u, $AFSSRVRO ); 
+
+					print $afsAddVroOut;
+
+					print PWD $afsAddVroOut;
+
+					my $afsRelVroOut = afsRelVro ( $AFSVOS, $opt_u ); 
+
+					print $afsRelVroOut;
+
+					print PWD $afsRelVroOut;
+
+					my $genAddDirOut = genAddDir ( $genDetDirRes ); 
+
+					print $genAddDirOut;
+
+					print PWD $genAddDirOut;
+
+					my $afsAddMptOut = afsAddMpt ( $AFSFS, $uname, $genDetDirRes ); 
+
+					print $afsAddMptOut;
+
+					print PWD $afsAddMptOut;
+
+					my $afsAddPrmOut = afsAddPrm ( $AFSFS, $uname, $genDetDirRes, $AFSPRM ); 
+
+					print PWD $afsAddPrmOut;
+				}
+			}
+		}
+	}
+
+	close PWD;
+
+	if ( $opt_k ) { 
+
+		print "\nSee $fileName for results and passwords.\n\n";
+
+	} else {
+
+		print "\nSee $fileName for results.\n\n";
+	}
+}
+
+
+sub matchPrnMidColID {
+
+	my $twoDeeArray = $_[0]; my $uname = $_[1]; 
+
+	my $h;
+
+	foreach ( @$twoDeeArray ) {
+
+		my $p;
+
+		foreach ( @$_ ) {
+
+			if ( $p == 1 ) { $h = 1; printf "%-${CW}s", $_; }
+
+			if ( $_ eq $uname ) { $p = 1; }
+		}
+
+		last if ( $p == 1 );
+	}
+
+	if ( $h != 1 ) { printf "%-${CW}s", $h; }
+}
+
+
+sub listKrbAccNames {
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	@krbGetUsrLst = sort { lc $a cmp lc $b } @krbGetUsrLst;
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $KAN, "", $LAI, $LGI, $AAI;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $AAI ) ) ) { print "-"; $x++; } print "\n";
+
+	for my $krb ( @krbGetUsrLst ) {
+
+		printf "%-${CW}s%-${CW}s", $krb, "";
+
+		matchPrnMidColID ( \@ldpGetPacLst, $krb );
+
+		matchPrnMidColID ( \@ldpGetPgrLst, $krb );
+
+		foreach ( @afsGetAidLst ) {
+
+			my $p;
+
+			foreach ( @$_ ) {
+
+				if ( $p == 1 ) { print "$_"; }
+
+				if ( $_ eq $krb ) { $p = 1; }
+			}
+
+			last if ( $p == 1 );
+		}
+
+		print "\n";
+	}
+}
+
+
+sub listLdpAccNames {
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	@ldpGetPacLst = sort { $a->[0] cmp $b->[0] } @ldpGetPacLst;
+
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $LAN, $LAI, $LGI, $AAI, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @ldpGetPacLst ) {
+
+		my $uname;
+
+		foreach ( @$_ ) {
+
+			if ( /\d+/ ) { printf "%-${CW}s", $_; } else { printf "%-${CW}s", $_; $uname = $_; }
+		}
+
+		matchPrnMidColID ( \@ldpGetPgrLst, $uname );
+
+		matchPrnMidColID ( \@afsGetAidLst, $uname );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $uname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
+sub listAfsAccNames {
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	@afsGetAidLst = sort { $a->[0] cmp $b->[0] } @afsGetAidLst;
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $AAN, $AAI, $LAI, $LGI, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @afsGetAidLst ) {
+
+		my $uname;
+
+		foreach ( @$_ ) {
+
+			if ( /\d+/ ) { printf "%-${CW}s", $_; } else { printf "%-${CW}s", $_; $uname = $_; }
+		}
+
+		matchPrnMidColID ( \@ldpGetPacLst, $uname );
+
+		matchPrnMidColID ( \@ldpGetPgrLst, $uname );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $uname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
+sub listLdpGrpNames {
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	@ldpGetPgrLst = sort { $a->[0] cmp $b->[0] } @ldpGetPgrLst;
+
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $LGN, $LGI, $LAI, $AAI, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @ldpGetPgrLst ) {
+
+		my $gname;
+
+		foreach ( @$_ ) { 
+
+			if ( /\d+/ ) { printf "%-${CW}s", $_; } else { printf "%-${CW}s", $_; $gname = $_; } 
+		}
+
+		matchPrnMidColID ( \@ldpGetPacLst, $gname );
+
+		matchPrnMidColID ( \@afsGetAidLst, $gname );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $gname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
+sub matchPrnMidColName {
+
+	my $twoDeeArray = $_[0]; my $id = $_[1];
+
+	my $h;
+
+	foreach ( @$twoDeeArray ) {
+
+		my ( $p, $uname );
+
+		foreach ( @$_ ) {
+
+			unless ( /\d+/ ) { $uname = $_; }
+
+			if ( $_ eq $id ) { $p = 1; }
+		}
+
+		if ( $p == 1 ) { $h = 1; printf "%-${CW}s", $uname; last; }
+	}
+
+	if ( $h != 1 ) { printf "%-${CW}s", $h; }
+}
+
+
+sub listLdpAccIDs {
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	@ldpGetPacLst = sort { $a->[1] cmp $b->[1] } @ldpGetPacLst;
+
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $LAI, $LAN, $LGN, $AAN, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @ldpGetPacLst ) {
+
+		my ( $uid, $uname );
+
+		foreach ( @$_ ) {
+
+			if ( /\d+/ ) { $uid = $_; } else { $uname = $_; }
+		}
+
+		printf "%-${CW}s%-${CW}s", $uid, $uname;
+
+		matchPrnMidColName ( \@ldpGetPgrLst, $uid );
+
+		matchPrnMidColName ( \@afsGetAidLst, $uid );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $uname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
+sub listAfsAccIDs {
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	@afsGetAidLst = sort { $a->[1] cmp $b->[1] } @afsGetAidLst;
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $AAI, $AAN, $LAN, $LGN, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @afsGetAidLst ) {
+
+		my ( $uid, $uname );
+
+		foreach ( @$_ ) {
+
+			if ( /\d+/ ) { $uid = $_; } else { $uname = $_; }
+		}
+
+		printf "%-${CW}s%-${CW}s", $uid, $uname;
+
+		matchPrnMidColName ( \@ldpGetPacLst, $uid );
+
+		matchPrnMidColName ( \@ldpGetPgrLst, $uid );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $uname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
+sub listLdpGrpIDs {
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	@ldpGetPgrLst = sort { $a->[1] cmp $b->[1] } @ldpGetPgrLst;
+
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $LGI, $LGN, $LAN, $AAN, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @ldpGetPgrLst ) {
+
+		my ( $gid, $uname );
+
+		foreach ( @$_ ) {
+
+			if ( /\d+/ ) { $gid = $_; } else { $uname = $_; }
+		}
+
+		printf "%-${CW}s%-${CW}s", $gid, $uname;
+
+		matchPrnMidColName ( \@ldpGetPacLst, $gid );
+
+		matchPrnMidColName ( \@afsGetAidLst, $gid );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $uname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
+sub listAllNames {
+
+	genDetAth;
+
+	my @genGetUsrLst = genGetUsr;
+
+	@genGetUsrLst = sort { lc $a cmp lc $b } @genGetUsrLst;
+
+	foreach ( @genGetUsrLst ) { print "$_\n"; }
+}
+
+
+sub listAllIDs {
+
+	genDetAth;
+
+	my @genGetIdsLst = genGetIds;
+
+	@genGetIdsLst = sort ( @genGetIdsLst );
+
+	foreach ( @genGetIdsLst ) { print "$_\n"; }
+}
+
+
+##############################################################################
+# Main
+##############################################################################
+
+if ( $opt_v ) {
+
+	version;
+
+} elsif ( $opt_L eq "kan" || $opt_L eq "k" ) {
+
+	listKrbAccNames;
+
+} elsif ( $opt_L eq "lan" ) {
+
+	listLdpAccNames;
+
+} elsif ( $opt_L eq "lai" ) {
+
+	listLdpAccIDs;
+
+} elsif ( $opt_L eq "lgn" ) {
+
+	listLdpGrpNames;
+
+} elsif ( $opt_L eq "lgi" ) {
+
+	listLdpGrpIDs;
+
+} elsif ( $opt_L eq "aan" || $opt_L eq "an" ) {
+
+	listAfsAccNames;
+
+} elsif ( $opt_L eq "aai" || $opt_L eq "ai" ) {
+
+	listAfsAccIDs;
+
+} elsif ( $opt_L eq "n" ) {
+
+	listAllNames;
+
+} elsif ( $opt_L eq "i" ) {
+
+	listAllIDs;
+
+} elsif ( $opt_I && $opt_u ) {
+
+	genInfUsr;
+
+} elsif ( $opt_A && $opt_D ) { 
+
+	options; 
+
+} elsif ( $opt_A && $opt_u ) { 
+
+	genAddUsr;
+
+} elsif ( $opt_f ) {
+
+	readFile;
+
+} elsif ( $opt_D && $opt_u ) { 
+
+	genDelUsr;
+
+} else {
+
+	options;
+}
+
+
+##############################################################################
+# End
+##############################################################################
+
+exit 0;

@@ -1,0 +1,18 @@
+kladmin (0.1.1)
+
+  * Applied code improvements suggested by Davor Ocelic:
+    - No more embedding of full path in command names;
+      path or env. variables now followed instead.
+    - simplified printing of options list.
+    - Used single statements for the import of variables
+      into the lower-level subroutines.
+
+ -- Jaap Winius <jwinius@rjsystems.nl> Sat, 3 April 2010
+
+kladmin (0.1)
+
+  * General debugging
+  * Code improvements
+  * Added AFS auth checking
+
+ -- Jaap Winius <jwinius@rjsystems.nl> Tue, 30 Mar 2010
