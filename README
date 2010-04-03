@@ -1,0 +1,310 @@
+                            kladmin v0.1.1
+                 'magic trio' user administration tool
+
+
+Quick start
+
+Just copy the "kladmin" script to a directory that is mentioned in your 
+environment's $PATH variable and kladmin.conf to your /etc/ directory. Edit 
+kladmin.conf and modify the LDPADMIN, LDAPUPTH, LDAPGPTH and AFSSRV options 
+according to your system. For full functionality, kladmin must be run as root on 
+your Kerberos administration (master KDC) server.
+
+
+Introduction 
+
+kladmin is a user account administration tool for distributed file systems based 
+on MIT Kerberos V, OpenLDAP and OpenAFS, otherwise known as the magic trio. This 
+system has many advantages, such as huge scalability, but user administration 
+does not immediately come to mind, since every new account requires that one be 
+created with the same name and ID number in each of the three subsystems. 
+Luckily, all of this runs on Linux, an environment in which it is easy to 
+develop tools to address these kinds of problems. 
+
+Written in Perl, kladmin is a front-end for a number of standard utilities. It 
+is not a replacement for them, but it does allows system administrators to save 
+time with typical user account administration. It can be used to create and 
+delete accounts individually, request information about them, as well as accept 
+an input file to quickly create many new accounts from a list of names. In all 
+of these cases the program can be instructed to create or delete accounts from 
+all three subsystems, which is does by default. Or, it can be instructed to 
+create or delete accounts from just one or two of the subsystems. Another 
+useful feature is its ability to generate various lists of account names and ID 
+numbers so that each one can be checked across all three subsystems. 
+
+The design is such that, when creating a normal account, the same number is used 
+for the UID and GID in LDAP as for the ID in AFS. Similarly, if an account name 
+and UID/GID number already exists in LDAP, but not in AFS, and kladmin is used 
+to create an account with the same name in AFS, the same number will be used for 
+AFS account's ID. The same thing happens when an AFS account already exists and 
+a matching LDAP account is created. 
+
+To prevent many predictable error conditions, kladmin checks if it has the 
+required access to the different subsystems before running any operations. It 
+does this automatically for Kerberos, AFS and the GNU/Linux OS, but needs a 
+configuration option to be set before LDAP administrative access can be 
+ascertained. The required configuration file contains information such as key 
+LDAP entries, AFS servers and partition names. 
+
+This application operates according to a popular convention regarding the AFS 
+directory structure used for the mount points of user volumes. For instance, for 
+a user account, gwashington, in an AFS cell called, example.com, it is assumed 
+that the directory path will be: 
+
+/afs/example.com/user/g/gw/gwashington/
+
+kladmin was developed on a Debian lenny system. It should work on many others, 
+although in some cases the script itself will have to be modified to reflect the 
+different locations of a few configuration files (included at the beginning of 
+the script). 
+
+
+1. Synopsys 
+
+kladmin [-A | -D] -u <user_name>
+
+kladmin [-A | -D] [-k] [-l] [-a] -u <user_name> [-p <password>]
+        [-i <id_number>] [-G <given_name>] [-S <surname>]
+
+kladmin [-k] [-l] [-a] -f <file_name>
+
+kladmin -I [-k] [-l] [-a] -u <user_name>
+
+kladmin -L <code>
+
+kladmin -v
+
+
+2. Options 
+
+-A	Add a user account. Requires the -u option. May be combined with the -k, 
+	-l and/or -a options, although the default is to use all three.
+
+-a	Specifies an AFS account.
+
+-D	Delete a user account. Requires the -u option. May be combined with the 
+	-k, -l and/or -a options, although the default is to use all three.
+
+-f file_name
+	Specifies an input file for adding accounts based on a list of names. 
+	The output file is called "<file_name>.out" and contains, among other 
+	things, the passwords that are automatically generated for each new 
+	account. May be combined with the -k, -l and/or -a options, although the 
+	default is to use all three. Accounts may only be created in this manner; 
+	not deleted.
+
+-G given_name
+	Specifies the given name of a user for an LDAP account. If omitted, the 
+	default is to set the given name to "Given name."
+
+-I
+	Display information about an account. Requires the -u option. May be 
+	combined with the -k, -l and/or -a options, although the default is to 
+	use all three.
+
+-i id_number
+	Forces the use of a particular ID number for a new account, although 
+	this ID number must not already be in use. The default is to use the 
+	lowest free ID number above the minimum value. 
+
+-k	Specifies a Kerberos account.
+
+-L code
+	Depending on the code given, generates different overview lists 
+	consisting of 1-5 columns of account names and/or ID numbers. The 
+	possible codes are: 
+
+	kan or k
+		Four columns: 1.) names of all Kerberos accounts, 
+		2.) UID numbers of the matching LDAP posixAccount entries, 
+		3.) GID numbers of the matching LDAP posixGroup entries, 
+		4.) ID numbers of the matching AFS account entries.
+
+	lan	Five columns: 1.) names of all LDAP posixAccount entries, 
+		2.) UID numbers of the same LDAP posixAccount entries, 
+		3.) GID numbers of the matching LDAP posixGroup entries, 
+		4.) ID numbers of the matching AFS account entries, 
+		5.) names of the matching Kerberos accounts.
+
+	lgn	Five columns: 1.) names of all LDAP posixGroup entries, 
+		2.) GID numbers of the same LDAP posixGroup entries, 
+		3.) UID numbers of the matching LDAP posixAccount entries, 
+		4.) ID numbers of the matching AFS account entries, 
+		5.) names of the matching Kerberos accounts.
+
+	aan or an
+		Five columns: 1.) names of all AFS accounts, 
+		2.) ID numbers of the same AFS accounts, 
+		3.) UID numbers of the matching LDAP posixAccount entries, 
+		4.) GID numbers of the matching LDAP posixGroup entries, 
+		5.) names of the matching Kerberos accounts.
+
+	lai	Five columns: 1.) UID numbers of all LDAP posixAccount entries, 
+		2.) names of the same LDAP posixAccount entries, 
+		3.) names of the matching LDAP posixGroup entries, 
+		4.) names of the matching AFS account entries, 
+		5.) names of the matching Kerberos accounts.
+
+	lgi	Five columns: 1.) GID numbers of all LDAP posixGroup entries, 
+		2.) names of the same LDAP posixGroup entries, 
+		3.) names of the matching LDAP posixAccount entries, 
+		4.) names of the matching AFS account entries, 
+		5.) names of the matching Kerberos accounts.
+
+	aai or ai
+		Five columns: 1.) ID numbers of all AFS accounts, 
+		2.) names of the same AFS accounts, 
+		3.) names of the matching LDAP posixAccount entries, 
+		4.) names of the matching LDAP posixGroup entries, 
+		5.) names of the matching Kerberos accounts.
+
+	i	One column: all UID/GID/ID numbers in use in both LDAP and AFS.
+
+	n	One column: all account names in use across all three subsystems.
+
+-l	Specifies an LDAP account.
+
+-p password
+	Specifies a password to be used with a Kerberos account. If omitted, the 
+	default behavior is to generate a random password.
+
+-S surname
+	Specifies the surname of a user for an LDAP account. If omitted, the 
+	default is to set the surname to "Surname."
+
+-u user_name
+	Specifies the user (account) name. 
+
+
+3. Input file format 
+
+The supported input file format is relatively simple, consisting of three 
+fields: an account name, a given name and a surname. Account names may not 
+contain any spaces, dashes ('-') or forward slashes ('/'). Given names may 
+contain dashes and spaces, but the latter are only accepted if the name is 
+enclosed between double quote marks ('"'). Surnames may also contain dashes and 
+spaces, but never require and double quote marks. Each of these three names must 
+be separated from the others with one or more spaces. 
+
+
+4. Examples 
+
+Normally, new accounts are created as follows:
+
+	~# kladmin -Au bbeamon -p longjump -i 10005 -G Bob -S Beamon
+
+If pressed for time, the same account can also be created with less input, in 
+which case a password will be generated automatically: 
+
+	~# kladmin -Au bbeamon
+
+But, it is also possible to create an account name only in certain subsystems, 
+e.g. Kerberos and AFS: 
+
+	~# kladmin -Akau bbeamon
+
+An entire account may be deleted at once: 
+
+	~# kladmin -Du bbeamon
+
+Or, only one of its components may be deleted, e.g. the LDAP account: 
+
+	~# kladmin -Dlu bbeamon
+
+New accounts can also be created from a list in an input file: 
+
+	~# kladmin -f input-file
+
+Partial accounts may also be created from a list in an input file, such as only 
+for Kerberos and AFS: 
+
+	~# kladmin -kaf input-file
+
+Example of a list of names in an input file, each with a valid format: 
+
+	bobama Barack Obama
+	dvvliet Don Van Vliet 
+	ahroliveira "Antonio Henrique" de Oliveira Marques
+	pjwitzig Pieter-Jan Witzig
+	rbourne Robin Bourne-Taylor
+
+
+5. Configuration file 
+
+A configuration file, /etc/kladmin.conf, must be created. A number of variables 
+must be configured, while others have default values. What follows is a complete 
+list of variables, any which may be altered as needed:
+
+APGARGS	
+	Arguments used for the apg tool. The default is "-a0 -m8 -Mncl". Option 
+	-n1 is always used.
+
+KRBOPT	Attributes to give Kerberos user accounts The default is "-clearpolicy 
+	+requires_preauth".
+
+IDMIN	Minimum UID/GID number to use for LDAP and AFS accounts. The default is 
+	10000.
+
+LDPADMIN	
+	DN, or partial DN, required for LDAP administrative access. *Required*
+
+LDAPUPTH
+	LDAP organizational unit for user entries. *Required*
+
+LDAPGPTH
+	LDAP organizational unit for group entries. *Required*
+
+OBJCL	Structural object class type for LDAP UID entry. The default is person, 
+	but other possibilities include organizationalPerson and inetOrgPerson.
+
+AFSPRT	AFS partition. The default is /vicepa.
+
+AFSSRV	AFS server for read-write volumes. *Required*
+
+AFSSRVRO
+	AFS servers for read-only volumes. Supports multiple 
+	host-name/partition-name combinations. No default values.
+
+AFSQUO	AFS user volume quota in KB. The default is 1048576 KB (1 GB).
+
+AFSPRM 	AFS permissions for users in their own user volumes. The default is all.
+
+CW	Column width of the uname/ID list overviews. The default is 15.
+
+
+The values marked as "required" should definitely be modified, or else kladmin 
+will not work. 
+
+
+6. Dependencies 
+
+For kladmin to function properly, a number of Debian packages must also be 
+installed on the same system:
+
+	apg                    
+	2.2.3.dfsg.1-2                
+	Automated Password Generator - Standalone version
+
+	coreutils              
+	6.10-6                        
+	The GNU core utilities
+
+	krb5-admin-server      
+	1.6.dfsg.4~beta1-5lenny2      
+	MIT Kerberos master server (kadmind)
+
+	krb5-user              
+	1.6.dfsg.4~beta1-5lenny2      
+	Basic programs to authenticate using MIT Kerberos
+
+	ldap-utils             
+	2.4.11-1+lenny1               
+	OpenLDAP utilities
+
+	openafs-client         
+	1.4.7.dfsg1-6+lenny2          
+	AFS distributed filesystem client support
+
+The krb5-admin-server package is required, because kladmin creates Kerberos 
+accounts using the kadmin.local program. Consequently, kladmin can only be run 
+as root on the host running the Kerberos master KDC.
