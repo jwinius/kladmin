@@ -1,4 +1,4 @@
-                            kladmin v0.1.1
+                            kladmin v0.2
                  'magic trio' user administration tool
 
 
@@ -7,8 +7,10 @@ Quick start
 Just copy the "kladmin" script to a directory that is mentioned in your 
 environment's $PATH variable and kladmin.conf to your /etc/ directory. Edit 
 kladmin.conf and modify the LDPADMIN, LDAPUPTH, LDAPGPTH and AFSSRV options 
-according to your system. For full functionality, kladmin must be run as root on 
-your Kerberos administration (master KDC) server.
+according to your system. For full functionality, kladmin must be run as root 
+on a machine that is the Kerberos administration (master KDC) server, an OpenAFS 
+database server and has administrative access to the OpenLDAP database. However, 
+kladmin can also be configured to work without OpenAFS and/or OpenLDAP.
 
 
 Introduction 
@@ -17,7 +19,7 @@ kladmin is a user account administration tool for distributed file systems based
 on MIT Kerberos V, OpenLDAP and OpenAFS, otherwise known as the magic trio. This 
 system has many advantages, such as huge scalability, but user administration 
 does not immediately come to mind, since every new account requires that one be 
-created with the same name and ID number in each of the three subsystems. 
+created with the same name and/or ID number in each of the three subsystems. 
 Luckily, all of this runs on Linux, an environment in which it is easy to 
 develop tools to address these kinds of problems. 
 
@@ -36,8 +38,8 @@ The design is such that, when creating a normal account, the same number is used
 for the UID and GID in LDAP as for the ID in AFS. Similarly, if an account name 
 and UID/GID number already exists in LDAP, but not in AFS, and kladmin is used 
 to create an account with the same name in AFS, the same number will be used for 
-AFS account's ID. The same thing happens when an AFS account already exists and 
-a matching LDAP account is created. 
+AFS account's ID. This also happens when an AFS account already exists and a 
+matching LDAP account is created. 
 
 To prevent many predictable error conditions, kladmin checks if it has the 
 required access to the different subsystems before running any operations. It 
@@ -53,10 +55,14 @@ that the directory path will be:
 
 /afs/example.com/user/g/gw/gwashington/
 
+Using the configuration file, kladmin can also be set to operate without support 
+for OpenAFS and/or OpenLDAP. Kerberos is always required, as is Kerberos 
+authentication for OpenLDAP when the latter is used.
+
 kladmin was developed on a Debian lenny system. It should work on many others, 
 although in some cases the script itself will have to be modified to reflect the 
-different locations of a few configuration files (included at the beginning of 
-the script). 
+different locations of a few configuration files (included in the "Declarations" 
+section at the beginning of the script).
 
 
 1. Synopsys 
@@ -233,7 +239,18 @@ Example of a list of names in an input file, each with a valid format:
 
 A configuration file, /etc/kladmin.conf, must be created. A number of variables 
 must be configured, while others have default values. What follows is a complete 
-list of variables, any which may be altered as needed:
+list of variables for v0.2 of the configuration file, any which may be altered 
+as needed:
+
+OPENLDAP
+	Option to enable or disable the use of OpenLDAP. When enabled, OpenLDAP 
+	must be configured to use MIT Kerberos V for authentication. Valid 
+	options are "enabled" and "disabled" with "enabled" being the default.
+
+OPENAFS
+	Option to enable or disable the use of OpenAFS. When enabled, OpenAFS 
+	must be configured to use MIT Kerberos V for authentication. Valid 
+	options are "enabled" and "disabled" with "enabled" being the default.
 
 APGARGS	
 	Arguments used for the apg tool. The default is "-a0 -m8 -Mncl". Option 
@@ -247,39 +264,43 @@ IDMIN	Minimum UID/GID number to use for LDAP and AFS accounts. The default is
 
 LDPADMIN	
 	DN, or partial DN, required for LDAP administrative access. *Required*
+	(unless option OPENLDAP is set to "disabled").
 
 LDAPUPTH
-	LDAP organizational unit for user entries. *Required*
+	LDAP organizational unit for user entries. *Required* (unless option 
+	OPENLDAP is set to "disabled").
 
 LDAPGPTH
-	LDAP organizational unit for group entries. *Required*
+	LDAP organizational unit for group entries. *Required* (unless option 
+	OPENLDAP is set to "disabled").
 
 OBJCL	Structural object class type for LDAP UID entry. The default is person, 
 	but other possibilities include organizationalPerson and inetOrgPerson.
 
 AFSPRT	AFS partition. The default is /vicepa.
 
-AFSSRV	AFS server for read-write volumes. *Required*
+AFSSRV	AFS server for read-write volumes. *Required* (unless option OPENAFS is 
+	set to "disabled").
 
 AFSSRVRO
 	AFS servers for read-only volumes. Supports multiple 
 	host-name/partition-name combinations. No default values.
 
-AFSQUO	AFS user volume quota in KB. The default is 1048576 KB (1 GB).
+AFSQUO	AFS user volume quota in KB. The default is 0 KB (unlimited).
 
 AFSPRM 	AFS permissions for users in their own user volumes. The default is all.
 
 CW	Column width of the uname/ID list overviews. The default is 15.
 
 
-The values marked as "required" should definitely be modified, or else kladmin 
-will not work. 
+When the OPENLDAP and OPENAFS options are enabled as they are by default, the 
+values marked as *Required* must be modified, or else kladmin will not work.
 
 
 6. Dependencies 
 
-For kladmin to function properly, a number of Debian packages must also be 
-installed on the same system:
+For full kladmin functionality on Debian lenny, a number of Debian packages must 
+also be installed on the same system:
 
 	apg                    
 	2.2.3.dfsg.1-2                
@@ -293,6 +314,10 @@ installed on the same system:
 	1.6.dfsg.4~beta1-5lenny2      
 	MIT Kerberos master server (kadmind)
 
+	krb5-kdc
+	1.6.dfsg.4~beta1-5lenny2
+	MIT Kerberos key server (KDC)
+
 	krb5-user              
 	1.6.dfsg.4~beta1-5lenny2      
 	Basic programs to authenticate using MIT Kerberos
@@ -305,6 +330,13 @@ installed on the same system:
 	1.4.7.dfsg1-6+lenny2          
 	AFS distributed filesystem client support
 
+	openafs-dbserver
+	1.4.7.dfsg1-6+lenny2
+	AFS distributed filesystem database server
+
 The krb5-admin-server package is required, because kladmin creates Kerberos 
 accounts using the kadmin.local program. Consequently, kladmin can only be run 
-as root on the host running the Kerberos master KDC.
+as root on the host running the Kerberos master KDC. The OpenAFS client and 
+dbserver packages are also required, because kladmin must be able to access 
+/etc/openafs/server/UserList to verify which users have OpenAFS administrative 
+access.

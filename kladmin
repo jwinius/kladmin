@@ -4,7 +4,7 @@
 # kladmin -- User account administration tool for use with distributed file 
 #            systems based on MIT Kerberos V, OpenLDAP and OpenAFS.
 #
-# Version 0.1.1
+# Version 0.2
 #
 # Written by Jaap Winius <jwinius@rjsystems.nl>
 # Copyright (c) 2010, Jaap Winius, RJ Systems, The Netherlands
@@ -76,7 +76,7 @@ for my $subCmd ( qw/ search add delete whoami / ) {		# LDAP utils
 # Read configuration file
 ##############################################################################
 
-my ( $APGARGS, $KRBOPT, $IDMIN, $LDPADMIN, $LDAPUPTH, $LDAPGPTH, $OBJCL, $AFSPRT, $AFSSRV, $AFSSRVRO, $AFSQUO, $AFSPRM, $CW );
+my ( $OPENLDAP, $OPENAFS, $APGARGS, $KRBOPT, $IDMIN, $LDPADMIN, $LDAPUPTH, $LDAPGPTH, $OBJCL, $AFSPRT, $AFSSRV, $AFSSRVRO, $AFSQUO, $AFSPRM, $CW );
 
 open Conf, "<$CFG" or die "Error: can't open configuration file, $CFG: $!\n";
 
@@ -84,6 +84,8 @@ while (<Conf>) {
 
 	chomp;
 
+	if ( /^OPENLDAP\s+([\w-\s]+)$/ ) { $OPENLDAP = $1; }	# Enable/disable support for OpenLDAP
+	if ( /^OPENAFS\s+([\w-\s]+)$/ ) { $OPENAFS = $1; }	# Enable/disable support for OpenAFS
 	if ( /^APGARGS\s+([\w-\s]+)$/ ) { $APGARGS = $1; }	# Arguments used for the apg tool
 	if ( /^KRBOPT\s+([\w-\+\s]+)$/ ) { $KRBOPT = $1; }	# Attributes to associate with Kerberos user accounts
 	if ( /^IDMIN\s+(\d+)$/ ) { $IDMIN = $1; }		# Minimum user/group ID number
@@ -106,12 +108,14 @@ close Conf;
 # Default values
 ##############################################################################
 
+unless ( $OPENLDAP ) { $OPENLDAP = "enabled"; }
+unless ( $OPENAFS ) { $OPENAFS = "enabled"; }
 unless ( $APGARGS ) { $APGARGS = "-a0 -m8 -Mncl"; }
 unless ( $KRBOPT ) { $KRBOPT = "-clearpolicy +requires_preauth"; }
 unless ( $IDMIN ) { $IDMIN = 10000; }
 unless ( $OBJCL ) { $OBJCL = "person"; }
 unless ( $AFSPRT ) { $AFSPRT = "/vicepa"; }
-unless ( $AFSQUO ) { $AFSQUO = 1048576; }
+unless ( $AFSQUO ) { $AFSQUO = 0; }
 unless ( $AFSPRM ) { $AFSPRM = "all"; }
 unless ( $CW ) { $CW = 15; }
 
@@ -163,7 +167,7 @@ When applicable, all three account types (k, l and a) are assumed if none are sp
 
 sub version {
 
-	print "kladmin v0.1\nCopyright (C) 2010 Jaap Winius, RJ Systems, The Netherlands\n";
+	print "kladmin v0.2\nCopyright (C) 2010 Jaap Winius, RJ Systems, The Netherlands\n";
 }
 
 
@@ -346,6 +350,8 @@ sub afsMatIds {
 
 
 sub ldpDetAth {
+
+	return if ( $OPENLDAP ne "enabled" && $OPENLDAP eq "disabled" );
 
 	my ( $ldapwhoami, $ldapauth ) = @_;
 
@@ -1273,6 +1279,8 @@ sub genGetIds {
 
 sub afsDetAth {
 
+	return if ( $OPENAFS ne "enabled" && $OPENAFS eq "disabled");
+
 	my $afsGetTokRes = afsGetTok ( $AFSTOK );
 
 	my @afsGetAdmLst = afsGetAdm ( $AFSUSRLST );
@@ -1383,7 +1391,7 @@ sub genAddUsr {
 		}
 	}
 
-	if ( $opt_l ) {
+	if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
 
 		my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
 
@@ -1414,9 +1422,18 @@ sub genAddUsr {
 				$genDetIdsRes = $afsMatIdsRes;
 			}
 
-			my $afsDetCelRes = afsDetCel ( $THISCELL );
+			my ( $afsDetCelRes, $genDetDirRes );
 
-			my $genDetDirRes = genDetDir ( $opt_u, $afsDetCelRes );
+			if ( $OPENAFS eq "enabled" && $OPENAFS ne "disabled" ) {
+
+				$afsDetCelRes = afsDetCel ( $THISCELL );
+
+				$genDetDirRes = genDetDir ( $opt_u, $afsDetCelRes );
+
+			} else {
+
+				$genDetDirRes = "/home";
+			}
 
 			my $ldpAddUsrOut = ldpAddUsr ( $LDAP { add }, $opt_u, $genDetIdsRes, $genDetDirRes, $opt_G, $opt_S ); 
 
@@ -1424,7 +1441,7 @@ sub genAddUsr {
 		}
 	}
 
-	if ( $opt_a ) {
+	if ( $opt_a && $OPENAFS ne "disabled" && $OPENAFS eq "enabled" ) {
 
 		my $afsDetCelRes = afsDetCel ( $THISCELL );
 
@@ -1463,9 +1480,12 @@ sub genAddUsr {
 
 			my $afsAddVolOut = afsAddVol ( $AFSVOS, $opt_u, $AFSSRV, $AFSPRT, $AFSQUO ); print $afsAddVolOut;
 
-			my $afsAddVroOut = afsAddVro ( $AFSVOS, $opt_u, $AFSSRVRO ); print $afsAddVroOut;
+			if ( $AFSSRVRO != undef ) {
 
-			my $afsRelVroOut = afsRelVro ( $AFSVOS, $opt_u ); print $afsRelVroOut;
+				my $afsAddVroOut = afsAddVro ( $AFSVOS, $opt_u, $AFSSRVRO ); print $afsAddVroOut;
+
+				my $afsRelVroOut = afsRelVro ( $AFSVOS, $opt_u ); print $afsRelVroOut;
+			}
 
 			my $genAddDirOut = genAddDir ( $genDetDirRes ); print $genAddDirOut;
 
@@ -1486,12 +1506,12 @@ sub genDelUsr {
 		my $krbDelUsrOut = krbDelUsr ( $KADMIN, $opt_u ); print $krbDelUsrOut;
 	}
 
-	if ( $opt_l ) {
+	if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
 
 		my $ldpDelUsrOut = ldpDelUsr ( $LDAP { search }, $LDAP { delete }, $opt_u ); print $ldpDelUsrOut;
 	}
 
-	if ( $opt_a ) {
+	if ( $opt_a && $OPENAFS ne "disabled" && $OPENAFS eq "enabled" ) {
 
 		my $afsDetCelRes = afsDetCel ( $THISCELL );
 
@@ -1539,12 +1559,12 @@ sub genInfUsr {
 		my $krbGetAccOut = krbGetAcc ( $KADMIN, $opt_u ); print $krbGetAccOut;
 	}
 
-	if ( $opt_l ) {
+	if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
 
 		my $ldpGetAccOut = ldpGetAcc ( $LDAP { search }, $opt_u ); print $ldpGetAccOut;
 	}
 
-	if ( $opt_a ) {
+	if ( $opt_a && $OPENAFS ne "disabled" && $OPENAFS eq "enabled" ) {
 
 		my $afsGetAccOut = afsGetAcc ( $AFSPTS, $opt_u ); print $afsGetAccOut;
 
@@ -1624,7 +1644,7 @@ sub readFile {
 
 			}
 
-			if ( $opt_l ) {
+			if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
 
 				my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
 
@@ -1665,7 +1685,7 @@ sub readFile {
 				}
 			}
 
-			if ( $opt_a ) {
+			if ( $opt_a && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
 
 				my $afsDetCelRes = afsDetCel ( $THISCELL );
 

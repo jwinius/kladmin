@@ -1,3 +1,28 @@
+kladmin (0.2)
+
+  * Made support for both OpenLDAP and OpenAFS optional
+    through the addition of two extra options to the 
+    kladmin.conf configuration file. However, the use
+    of MIT Kerberos V is still obligatory.
+    - Altered the documentation to reflect the above.
+    - Thanks to Nils-Anders Nøttseter.
+    
+  * Changed the default for the AFS maximum volume quota 
+    in the kladmin.conf configuration file (AFSQUO) from 
+    1048576 KB to 0 KB (unlimited).
+    
+ -- Jaap Winius <jwinius@rjsystems.nl> Mon, 5 July 2010
+
+kladmin (0.1.2)
+
+  * Bugfix to prevent kladmin from running two routines 
+    to create and release read-only volumes when none 
+    are indicated.
+    
+  * Minor edits to kladmin.conf.
+
+ -- Jaap Winius <jwinius@rjsystems.nl> Sun, 21 June 2010
+
 kladmin (0.1.1)
 
   * Applied code improvements suggested by Davor Ocelic:
