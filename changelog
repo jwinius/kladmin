@@ -1,3 +1,43 @@
+kladmin (0.2.1)
+
+  * Replaced the genDetIds subroutine with a more robust
+    version written by Nils-Anders Nøttseter. Summary:
+    - Sorting of existing IDs are now done as integers, 
+      not as strings (42 would sort after 2000).
+    - Just loop over the smaller list of existing IDs,
+      thus avoiding the previous double loop.
+    - Prevents failure to give a proper ID if there were 
+      no users in LDAP.
+
+  * Created a new subroutine, genDetExe, to verify the 
+    existence of all necessary executables. It is always 
+    called at the beginning of each operation to prevent
+    any failures from occurring half way through.
+
+  * Added more code to check that routines associated
+    with OpenLDAP and/or OpenAFS are not run when they 
+    are not required.
+
+  * Added the option IDMAX to kladmin.conf, to 
+    optionally determine the maximum ID values for AFS 
+    accounts and LDAP accounts and groups.
+
+  * Added a few checks to make sure that the values for
+    the options OPENLDAP, OPENAFS and IDMAX remain 
+    consistent and do not exceed reasonable bounds.
+
+  * ID number checking now takes place before accounts 
+    are created, as opposed to during the operation, to
+    prevent erroring out half way through.
+
+  * Following Nils-Anders' example, modified two other
+    sorting routines to treat ID numbers as integers.
+
+  * Modified the README file to reflect the addition of
+    the IDMAX option to kladmin.conf.
+
+ -- Jaap Winius <jwinius@rjsystems.nl> Wed, 14 July 2010
+
 kladmin (0.2)
 
   * Made support for both OpenLDAP and OpenAFS optional

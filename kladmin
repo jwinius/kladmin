@@ -4,7 +4,7 @@
 # kladmin -- User account administration tool for use with distributed file 
 #            systems based on MIT Kerberos V, OpenLDAP and OpenAFS.
 #
-# Version 0.2
+# Version 0.2.1
 #
 # Written by Jaap Winius <jwinius@rjsystems.nl>
 # Copyright (c) 2010, Jaap Winius, RJ Systems, The Netherlands
@@ -52,6 +52,7 @@ my $LGI		= "LDAP grp.";				# Column label for LDAP group GIDs
 my $AAN		= "AFS acc.";				# Column label for AFS account names
 my $AAI		= "AFS acc.";				# Column label for AFS account IDs
 
+my $WHICH	= $ENV { uc "which" } || "which";		# Used to find the locations of other executables
 my $ID		= $ENV { uc "id" } || "id";			# Display the user's identity
 my $APG		= $ENV { uc "apg" } || "apg";			# Generates random passwords. Package 'apg' must be installed
 my $KADMIN	= $ENV { uc "kadmin.local" } || "kadmin.local";	# Local Kerberos V database administration program
@@ -68,7 +69,7 @@ for my $subCmd ( qw/ search add delete whoami / ) {		# LDAP utils
 
         my $fullName = "ldap" . $subCmd;
 
-        $LDAP { $subCmd } = $ENV{ uc $fullName } || $fullName;
+        $LDAP { $subCmd } = $ENV { uc $fullName } || $fullName;
 }
 
 
@@ -76,7 +77,7 @@ for my $subCmd ( qw/ search add delete whoami / ) {		# LDAP utils
 # Read configuration file
 ##############################################################################
 
-my ( $OPENLDAP, $OPENAFS, $APGARGS, $KRBOPT, $IDMIN, $LDPADMIN, $LDAPUPTH, $LDAPGPTH, $OBJCL, $AFSPRT, $AFSSRV, $AFSSRVRO, $AFSQUO, $AFSPRM, $CW );
+my ( $OPENLDAP, $OPENAFS, $APGARGS, $KRBOPT, $IDMIN, $IDMAX, $LDPADMIN, $LDAPUPTH, $LDAPGPTH, $OBJCL, $AFSPRT, $AFSSRV, $AFSSRVRO, $AFSQUO, $AFSPRM, $CW );
 
 open Conf, "<$CFG" or die "Error: can't open configuration file, $CFG: $!\n";
 
@@ -89,6 +90,7 @@ while (<Conf>) {
 	if ( /^APGARGS\s+([\w-\s]+)$/ ) { $APGARGS = $1; }	# Arguments used for the apg tool
 	if ( /^KRBOPT\s+([\w-\+\s]+)$/ ) { $KRBOPT = $1; }	# Attributes to associate with Kerberos user accounts
 	if ( /^IDMIN\s+(\d+)$/ ) { $IDMIN = $1; }		# Minimum user/group ID number
+	if ( /^IDMAX\s+(\d+)$/ ) { $IDMAX = $1; }		# Maximum user/group ID number
 	if ( /^LDPADMIN\s+([\w+,=\s]+)$/ ) { $LDPADMIN = $1; }	# DN, or partial DN, required for LDAP administrative access
 	if ( /^LDAPUPTH\s+([\w+,=\s]+)$/ ) { $LDAPUPTH = $1; }	# LDAP user ou
 	if ( /^LDAPGPTH\s+([\w+,=\s]+)$/ ) { $LDAPGPTH = $1; }	# LDAP group ou
@@ -104,6 +106,35 @@ while (<Conf>) {
 close Conf;
 
 
+if ( $OPENLDAP ) {
+
+	unless ( $OPENLDAP eq "enabled" || $OPENLDAP eq "disabled" ) {
+
+		die "Option OPENLDAP in $CFG must be set to \"enabled\" or \"disabled\"\n";
+	}
+}
+
+
+if ( $OPENAFS ) {
+
+	unless ( $OPENAFS eq "enabled" || $OPENAFS eq "disabled" ) {
+
+		die "Option OPENAFS in $CFG must be set to \"enabled\" or \"disabled\"\n";
+	}
+}
+
+if ( $IDMAX > 65535 ) {
+
+	die "The value for option IDMAX in $CFG may not exceed 65535\n";
+}
+
+
+if ( $IDMIN > $IDMAX ) { 
+
+	die "The value for option IDMAX in $CFG must be equal to or larger than IDMIN\n";
+}
+
+
 ##############################################################################
 # Default values
 ##############################################################################
@@ -113,6 +144,7 @@ unless ( $OPENAFS ) { $OPENAFS = "enabled"; }
 unless ( $APGARGS ) { $APGARGS = "-a0 -m8 -Mncl"; }
 unless ( $KRBOPT ) { $KRBOPT = "-clearpolicy +requires_preauth"; }
 unless ( $IDMIN ) { $IDMIN = 10000; }
+unless ( $IDMAX ) { $IDMAX = 65535; }
 unless ( $OBJCL ) { $OBJCL = "person"; }
 unless ( $AFSPRT ) { $AFSPRT = "/vicepa"; }
 unless ( $AFSQUO ) { $AFSQUO = 0; }
@@ -167,7 +199,7 @@ When applicable, all three account types (k, l and a) are assumed if none are sp
 
 sub version {
 
-	print "kladmin v0.2\nCopyright (C) 2010 Jaap Winius, RJ Systems, The Netherlands\n";
+	print "kladmin v0.2.1\nCopyright (C) 2010 Jaap Winius, RJ Systems, The Netherlands\n";
 }
 
 
@@ -178,6 +210,7 @@ sub version {
 # Subroutine descriptions			   Sub name	Output name
 # 
 # Run external programs and return the output	-  genRunPrg	@genRunPrgOut
+# Determine if a necessary executable exists    -  genDetExe    -
 # Get existing account names from Kerberos	-  krbGetUsr	@krbGetUsrLst
 # Get existing account names from LDAP		-  ldpGetUsr	@ldpGetUsrLst
 # Get existing account names from AFS		-  afsGetUsr	@afsGetUsrLst
@@ -259,6 +292,34 @@ sub genRunPrg {
 	close INPUT;
 
 	return @output;
+}
+
+
+sub genDetExe {
+
+        my ( $which, $exe ) = @_;
+
+	my @args = ( "$exe" );
+
+	my @genRunPrgOut = genRunPrg ( $which, \@args );
+
+	my $path;
+
+	foreach ( @genRunPrgOut ) {
+
+		chomp;
+
+		if ( /^(.+)$/ ) { 
+
+			$path = $1;
+
+		} else { 
+
+			$path = 0; 
+		}
+	}
+
+	unless ( -x $path ) { die "Error, cannot run $exe: $!\n"; }
 }
 
 
@@ -351,7 +412,7 @@ sub afsMatIds {
 
 sub ldpDetAth {
 
-	return if ( $OPENLDAP ne "enabled" && $OPENLDAP eq "disabled" );
+	return if ( $OPENLDAP eq "disabled" );
 
 	my ( $ldapwhoami, $ldapauth ) = @_;
 
@@ -551,31 +612,36 @@ sub genDetUsr {
 }
 
 
-sub genDetIds { 
+sub genDetIds {		# Determine lowest free ID number (genDetIds) 
 
-	my ( $idList, $idMin ) = @_;
+	my ( $idList, $idMin, $idMax ) = @_;
 
-	my ( @sortedIdLst, $output );
+	return $idMin unless @$idList;		# Return minimum ID if the list is empty
 
-	@sortedIdLst = sort ( @$idList );
+	my ( @sortedIdLst, $startLoop );
 
-	while ( $idMin < 65535 ) { 
+	@sortedIdLst = sort { $a <=> $b } @$idList;	# Sort the list as integers 
 
-		foreach ( @sortedIdLst ) {
+	my %set = map { $_ => 1 } @sortedIdLst;		# Map the list to a set (hash) for easy checking of existing IDs
 
-			next if ( $_ < $idMin );
+	$startLoop = $idMin <= $sortedIdLst[0] ? $idMin : $sortedIdLst[0];	# If the sorted lists starts higher than $idMin, start the loop
+										# at $idMin, otherwise start at the first element of the list
 
-			last if ( $_ == $idMin );
+	for ( my $i = $startLoop; $i < $sortedIdLst[-1]; $i++ ) {	# Loop through the list of existing IDs to check for available holes
 
-			$output = $idMin;
+		next if ( $i < $idMin ); 
+
+		if ( $i <= $idMax ) {
+
+			if ( !defined $set{$i} ) { return $i; }
+
+		} else {
+
+			die "\nFail: All IDs from $idMin to $idMax are in use.\n";
 		}
-
-		last if ( $output != undef );
-
-		$idMin++;
 	}
 
-	return $output;
+	return $sortedIdLst[-1]+1;	# Return last ID + 1 if there are no holes in the list
 }
 
 
@@ -659,6 +725,8 @@ sub afsGetAcc {
 
 sub ldpGetPac {
 
+	return if ( $OPENLDAP eq "disabled" );
+
 	my ( $ldapsearch ) = @_;
 
 	my @args = ( "-Q", "-LLL", "objectClass=posixAccount" );
@@ -679,6 +747,8 @@ sub ldpGetPac {
 
 
 sub ldpGetPgr {
+
+	return if ( $OPENLDAP eq "disabled" );
 
 	my ( $ldapsearch ) = @_;
 
@@ -738,6 +808,8 @@ sub afsGetUsr {
 
 
 sub afsGetAid {
+
+	return if ( $OPENAFS eq "disabled" );
 
 	my ( $pts ) = @_;
 
@@ -1245,9 +1317,11 @@ sub genGetUsr {
 
 	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
 
-	my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
+	my ( @ldpGetUsrLst, @afsGetUsrLst );
 
-	my @afsGetUsrLst = afsGetUsr ( $AFSPTS );
+	if ( $OPENLDAP eq "enabled" ) { @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } ); }
+
+	if ( $OPENAFS eq "enabled" ) { @afsGetUsrLst = afsGetUsr ( $AFSPTS ); }
 
 	my ( $item, %seen, @output );
 
@@ -1262,9 +1336,11 @@ sub genGetUsr {
 
 sub genGetIds {
 
-	my @ldpGetIdsLst = ldpGetIds ( $LDAP { search } );
+	my ( @ldpGetIdsLst, @afsGetIdsLst );
 
-	my @afsGetIdsLst = afsGetIds ( $AFSPTS );
+	if ( $OPENLDAP eq "enabled" ) { @ldpGetIdsLst = ldpGetIds ( $LDAP { search } ); }
+
+	if ( $OPENAFS eq "enabled" ) { @afsGetIdsLst = afsGetIds ( $AFSPTS ); }
 
 	my ( $item, %seen, @output );
 
@@ -1279,13 +1355,15 @@ sub genGetIds {
 
 sub afsDetAth {
 
-	return if ( $OPENAFS ne "enabled" && $OPENAFS eq "disabled");
+	return if ( $OPENAFS eq "disabled");
 
-	my $afsGetTokRes = afsGetTok ( $AFSTOK );
+	my ( $afstok, $afspts, $afsuserlist ) = @_;
 
-	my @afsGetAdmLst = afsGetAdm ( $AFSUSRLST );
+	my $afsGetTokRes = afsGetTok ( $afstok );
 
-	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+	my @afsGetAidLst = afsGetAid ( $afspts );
+
+	my @afsGetAdmLst = afsGetAdm ( $afsuserlist );
 
 	my $name; my $n = 0;
 
@@ -1313,13 +1391,29 @@ sub afsDetAth {
 
 sub genDetAth {
 
+	genDetExe ( $WHICH, $ID );
+
+	genDetExe ( $WHICH, $KLIST );
+
+	if ( $OPENLDAP eq "enabled") {
+
+		genDetExe ( $WHICH, $LDAP { whoami } );
+	}
+
+	if ( $OPENAFS eq "enabled") {
+
+		genDetExe ( $WHICH, $AFSTOK );
+
+		genDetExe ( $WHICH, $AFSPTS );
+	}
+
 	unxDetAth ( $ID ) if ( $opt_k || $opt_a || $opt_L );
 
 	krbDetAth ( $KLIST, $KRBAUTH ) if ( $opt_k || $opt_L );
 
 	ldpDetAth ( $LDAP { whoami }, $LDPADMIN ) if ( $opt_l || $opt_L );
 
-	afsDetAth if ( $opt_a || $opt_L );
+	afsDetAth ( $AFSTOK, $AFSPTS, $AFSUSRLST ) if ( $opt_a || $opt_L );
 }
 
 
@@ -1348,16 +1442,46 @@ sub genDetAth {
 
 sub genAddUsr {
 
+	if ( $opt_k ) {
+
+		genDetExe ( $WHICH, $KADMIN );
+
+		unless ( $opt_p ) { genDetExe ( $WHICH, $APG ); }
+	}
+
+	if ( $opt_l && $OPENLDAP eq "enabled" ) {
+
+		genDetExe ( $WHICH, $LDAP { search } );
+
+		genDetExe ( $WHICH, $LDAP { add } );
+	}		
+
+	if ( $opt_a && $OPENAFS eq "enabled" ) {
+
+		genDetExe ( $WHICH, $AFSVOS );
+
+		genDetExe ( $WHICH, $AFSFS );
+	}
+
 	genDetAth;
+
+	my @genGetIdsLst = genGetIds;							# Get a list of all ID numbers
 
 	if ( $opt_i ) { 
 
-		my @genGetIdsLst = genGetIds;
-
-		foreach ( @genGetIdsLst ) { 
-
-			if ( $_ == $opt_i ) { print "ID number already in use\n"; exit 0; }
+		foreach ( @genGetIdsLst ) { 						# Check if the specified 
+											# ID number is free in 
+			if ( $_ == $opt_i ) { die "ID number already in use\n"; }	# both LDAP and/or AFS
 		}
+
+		if ( $opt_i < $IDMIN || $opt_i > $IDMAX ) {				# Check if the specified
+											# ID number falls within
+			die "ID number outside of allowed range, $IDMIN-$IDMAX\n";	# the allowed range
+		}
+
+	} else {									# Check if any ID number is free
+											# within the allowed range
+		my $genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN, $IDMAX );	# according to LDAP and/or AFS
 	}
 
 	if ( $opt_k ) {
@@ -1391,7 +1515,7 @@ sub genAddUsr {
 		}
 	}
 
-	if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
+	if ( $opt_l && $OPENLDAP eq "enabled" ) {
 
 		my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
 
@@ -1403,9 +1527,18 @@ sub genAddUsr {
 
 		} else {
 
-			my $afsMatIdsRes = afsMatIds ( $AFSPTS, $opt_u );
+			my $afsMatIdsRes;
 
-			my ( @genGetIdsLst, $genDetIdsRes );
+			if ( $OPENAFS eq "enabled" ) {
+
+				$afsMatIdsRes = afsMatIds ( $AFSPTS, $opt_u );
+
+			} else {
+
+				$afsMatIdsRes = 0;
+			}
+
+			my $genDetIdsRes;
 
 			if ( $opt_i ) {
 
@@ -1413,9 +1546,7 @@ sub genAddUsr {
 
 			} elsif ( $afsMatIdsRes == 0 ) {
 
-				@genGetIdsLst = genGetIds;
-
-				$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+				$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN, $IDMAX );
 
 			} else {
 
@@ -1424,7 +1555,7 @@ sub genAddUsr {
 
 			my ( $afsDetCelRes, $genDetDirRes );
 
-			if ( $OPENAFS eq "enabled" && $OPENAFS ne "disabled" ) {
+			if ( $OPENAFS eq "enabled" ) {
 
 				$afsDetCelRes = afsDetCel ( $THISCELL );
 
@@ -1441,7 +1572,7 @@ sub genAddUsr {
 		}
 	}
 
-	if ( $opt_a && $OPENAFS ne "disabled" && $OPENAFS eq "enabled" ) {
+	if ( $opt_a && $OPENAFS eq "enabled" ) {
 
 		my $afsDetCelRes = afsDetCel ( $THISCELL );
 
@@ -1457,7 +1588,12 @@ sub genAddUsr {
 
 		} else {
 
-			my $ldpMatIdsRes = ldpMatIds ( $LDAP { search }, $opt_u );
+			my $ldpMatIdsRes;
+
+			if ( $OPENLDAP eq "enabled" ) {
+
+				$ldpMatIdsRes = ldpMatIds ( $LDAP { search }, $opt_u );
+			}
 
 			my ( @genGetIdsLst, $genDetIdsRes );
 
@@ -1469,7 +1605,7 @@ sub genAddUsr {
 
 				@genGetIdsLst = genGetIds;
 
-				$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+				$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN, $IDMAX );
 
 			} else {
 
@@ -1499,6 +1635,25 @@ sub genAddUsr {
 
 sub genDelUsr {
 
+	if ( $opt_k ) {
+
+		genDetExe ( $WHICH, $KADMIN );
+	}
+
+	if ( $opt_l && $OPENLDAP eq "enabled" ) {
+
+		genDetExe ( $WHICH, $LDAP { search } );
+
+		genDetExe ( $WHICH, $LDAP { delete } );
+	}
+
+	if ( $opt_a && $OPENAFS eq "enabled" ) {
+
+		genDetExe ( $WHICH, $AFSVOS );
+
+		genDetExe ( $WHICH, $AFSFS );
+	}
+
 	genDetAth;
 
 	if ( $opt_k ) { 
@@ -1506,12 +1661,12 @@ sub genDelUsr {
 		my $krbDelUsrOut = krbDelUsr ( $KADMIN, $opt_u ); print $krbDelUsrOut;
 	}
 
-	if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
+	if ( $opt_l && $OPENLDAP eq "enabled" ) {
 
 		my $ldpDelUsrOut = ldpDelUsr ( $LDAP { search }, $LDAP { delete }, $opt_u ); print $ldpDelUsrOut;
 	}
 
-	if ( $opt_a && $OPENAFS ne "disabled" && $OPENAFS eq "enabled" ) {
+	if ( $opt_a && $OPENAFS eq "enabled" ) {
 
 		my $afsDetCelRes = afsDetCel ( $THISCELL );
 
@@ -1552,6 +1707,23 @@ sub genDelUsr {
 
 sub genInfUsr {
 
+	if ( $opt_k ) {
+
+		genDetExe ( $WHICH, $KADMIN );
+	}
+
+	if ( $opt_l && $OPENLDAP eq "enabled" ) {
+
+		genDetExe ( $WHICH, $LDAP { search } );
+	}
+
+	if ( $opt_a && $OPENAFS eq "enabled" ) {
+
+		genDetExe ( $WHICH, $AFSVOS );
+
+		genDetExe ( $WHICH, $AFSFS );
+	}
+
 	genDetAth;
 
 	if ( $opt_k ) {
@@ -1559,12 +1731,12 @@ sub genInfUsr {
 		my $krbGetAccOut = krbGetAcc ( $KADMIN, $opt_u ); print $krbGetAccOut;
 	}
 
-	if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
+	if ( $opt_l && $OPENLDAP eq "enabled" ) {
 
 		my $ldpGetAccOut = ldpGetAcc ( $LDAP { search }, $opt_u ); print $ldpGetAccOut;
 	}
 
-	if ( $opt_a && $OPENAFS ne "disabled" && $OPENAFS eq "enabled" ) {
+	if ( $opt_a && $OPENAFS eq "enabled" ) {
 
 		my $afsGetAccOut = afsGetAcc ( $AFSPTS, $opt_u ); print $afsGetAccOut;
 
@@ -1584,6 +1756,27 @@ sub genInfUsr {
 
 
 sub readFile {
+
+	if ( $opt_k ) {
+
+		genDetExe ( $WHICH, $KADMIN );
+
+		genDetExe ( $WHICH, $APG );
+	}
+
+	if ( $opt_l && $OPENLDAP eq "enabled" ) {
+
+		genDetExe ( $WHICH, $LDAP { search } );
+
+		genDetExe ( $WHICH, $LDAP { add } );
+	}
+
+	if ( $opt_a && $OPENAFS eq "enabled" ) {
+
+		genDetExe ( $WHICH, $AFSVOS );
+
+		genDetExe ( $WHICH, $AFSFS );
+	}
 
 	genDetAth;
 
@@ -1615,13 +1808,17 @@ sub readFile {
 
 			$uname = $1; $gname = $2; $sname = $3;
 
+			my @genGetIdsLst = genGetIds;
+
+			my $genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN, $IDMAX );
+
 			if ( $opt_k ) {
 
 				my @krbGetUsrLst = krbGetUsr ( $KADMIN );
 
 				my $krbDetUsrOut = genDetUsr ( \@krbGetUsrLst, $uname );
 
-				if ( $krbDetUsrOut == 1 ) { 
+				if ( $krbDetUsrOut == 1 ) {
 
 					print "\nKerberos account \"$uname\" already exists.\n"; 
 
@@ -1644,7 +1841,7 @@ sub readFile {
 
 			}
 
-			if ( $opt_l && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
+			if ( $opt_l && $OPENLDAP eq "enabled" ) {
 
 				my @ldpGetUsrLst = ldpGetUsr ( $LDAP { search } );
 
@@ -1658,7 +1855,16 @@ sub readFile {
 
 				} else {
 
-					my $afsMatIdsRes = afsMatIds ( $AFSPTS, $uname );
+					my $afsMatIdsRes;
+
+					if ( $OPENAFS eq "enabled" ) {
+
+						$afsMatIdsRes = afsMatIds ( $AFSPTS, $uname );
+
+					} else {
+
+						$afsMatIdsRes = 0;
+					}
 
 					my ( @genGetIdsLst, $genDetIdsRes );
 
@@ -1666,16 +1872,25 @@ sub readFile {
 
 						@genGetIdsLst = genGetIds;
 
-						$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+						$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN, $IDMAX );
 
 					} else {
 
 						$genDetIdsRes = $afsMatIdsRes;
 					}
 
-					my $afsDetCelRes = afsDetCel ( $THISCELL );
+					my ( $afsDetCelRes, $genDetDirRes );
 
-					my $genDetDirRes = genDetDir ( $uname, $afsDetCelRes );
+					if ( $OPENAFS eq "enabled" ) {
+
+						$afsDetCelRes = afsDetCel ( $THISCELL );
+
+						$genDetDirRes = genDetDir ( $opt_u, $afsDetCelRes );
+
+					} else {
+
+						$genDetDirRes = "/home";
+					}
 
 					my $ldpAddUsrOut = ldpAddUsr ( $LDAP { add }, $uname, $genDetIdsRes, $genDetDirRes, $gname, $sname ); 
 
@@ -1685,7 +1900,7 @@ sub readFile {
 				}
 			}
 
-			if ( $opt_a && $OPENLDAP ne "disabled" && $OPENLDAP eq "enabled" ) {
+			if ( $opt_a && $OPENAFS eq "enabled" ) {
 
 				my $afsDetCelRes = afsDetCel ( $THISCELL );
 
@@ -1703,7 +1918,12 @@ sub readFile {
 
 				} else {
 
-					my $ldpMatIdsRes = ldpMatIds ( $LDAP { search }, $uname );
+					my $ldpMatIdsRes;
+
+					if ( $OPENLDAP eq "enabled" ) {
+
+						$ldpMatIdsRes = ldpMatIds ( $LDAP { search }, $uname );
+					}
 
 					my ( @genGetIdsLst, $genDetIdsRes );
 
@@ -1711,7 +1931,7 @@ sub readFile {
 
 						@genGetIdsLst = genGetIds;
 
-						$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN );
+						$genDetIdsRes = genDetIds ( \@genGetIdsLst, $IDMIN, $IDMAX );
 
 					} else {
 
@@ -1801,6 +2021,10 @@ sub matchPrnMidColID {
 
 sub listKrbAccNames {
 
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
 	genDetAth;
 
 	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
@@ -1815,7 +2039,7 @@ sub listKrbAccNames {
 
 	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $KAN, "", $LAI, $LGI, $AAI;
 
-	my $x = 0; while ( $x < ( 4 * $CW + length( $AAI ) ) ) { print "-"; $x++; } print "\n";
+	my $x = 0; while ( $x < ( 4 * $CW + length ( $AAI ) ) ) { print "-"; $x++; } print "\n";
 
 	for my $krb ( @krbGetUsrLst ) {
 
@@ -1846,13 +2070,17 @@ sub listKrbAccNames {
 
 sub listLdpAccNames {
 
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
 	genDetAth;
 
 	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
 
 	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
 	
-	@ldpGetPacLst = sort { $a->[0] cmp $b->[0] } @ldpGetPacLst;
+	@ldpGetPacLst = sort { lc $a->[0] cmp lc $b->[0] } @ldpGetPacLst;
 
 	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
 	
@@ -1885,49 +2113,12 @@ sub listLdpAccNames {
 }
 
 
-sub listAfsAccNames {
-
-	genDetAth;
-
-	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
-
-	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
-	
-	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
-	
-	my @afsGetAidLst = afsGetAid ( $AFSPTS );
-
-	@afsGetAidLst = sort { $a->[0] cmp $b->[0] } @afsGetAidLst;
-
-	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $AAN, $AAI, $LAI, $LGI, $KAN;
-
-	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
-
-	foreach ( @afsGetAidLst ) {
-
-		my $uname;
-
-		foreach ( @$_ ) {
-
-			if ( /\d+/ ) { printf "%-${CW}s", $_; } else { printf "%-${CW}s", $_; $uname = $_; }
-		}
-
-		matchPrnMidColID ( \@ldpGetPacLst, $uname );
-
-		matchPrnMidColID ( \@ldpGetPgrLst, $uname );
-
-		foreach ( @krbGetUsrLst ) {
-
-			if ( $_ eq $uname ) { print $_; last; }
-		}
-
-		print "\n";
-	}
-}
-
-
 sub listLdpGrpNames {
 
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
 	genDetAth;
 
 	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
@@ -1936,7 +2127,7 @@ sub listLdpGrpNames {
 	
 	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
 	
-	@ldpGetPgrLst = sort { $a->[0] cmp $b->[0] } @ldpGetPgrLst;
+	@ldpGetPgrLst = sort { lc $a->[0] cmp lc $b->[0] } @ldpGetPgrLst;
 
 	my @afsGetAidLst = afsGetAid ( $AFSPTS );
 
@@ -1960,6 +2151,51 @@ sub listLdpGrpNames {
 		foreach ( @krbGetUsrLst ) {
 
 			if ( $_ eq $gname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
+sub listAfsAccNames {
+
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	@afsGetAidLst = sort { lc $a->[0] cmp lc $b->[0] } @afsGetAidLst;
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $AAN, $AAI, $LAI, $LGI, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @afsGetAidLst ) {
+
+		my $uname;
+
+		foreach ( @$_ ) {
+
+			if ( /\d+/ ) { printf "%-${CW}s", $_; } else { printf "%-${CW}s", $_; $uname = $_; }
+		}
+
+		matchPrnMidColID ( \@ldpGetPacLst, $uname );
+
+		matchPrnMidColID ( \@ldpGetPgrLst, $uname );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $uname ) { print $_; last; }
 		}
 
 		print "\n";
@@ -1993,13 +2229,17 @@ sub matchPrnMidColName {
 
 sub listLdpAccIDs {
 
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
 	genDetAth;
 
 	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
 
 	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
 	
-	@ldpGetPacLst = sort { $a->[1] cmp $b->[1] } @ldpGetPacLst;
+	@ldpGetPacLst = sort { $a->[1] <=> $b->[1] } @ldpGetPacLst;
 
 	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
 	
@@ -2034,51 +2274,12 @@ sub listLdpAccIDs {
 }
 
 
-sub listAfsAccIDs {
-
-	genDetAth;
-
-	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
-
-	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
-	
-	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
-	
-	my @afsGetAidLst = afsGetAid ( $AFSPTS );
-
-	@afsGetAidLst = sort { $a->[1] cmp $b->[1] } @afsGetAidLst;
-
-	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $AAI, $AAN, $LAN, $LGN, $KAN;
-
-	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
-
-	foreach ( @afsGetAidLst ) {
-
-		my ( $uid, $uname );
-
-		foreach ( @$_ ) {
-
-			if ( /\d+/ ) { $uid = $_; } else { $uname = $_; }
-		}
-
-		printf "%-${CW}s%-${CW}s", $uid, $uname;
-
-		matchPrnMidColName ( \@ldpGetPacLst, $uid );
-
-		matchPrnMidColName ( \@ldpGetPgrLst, $uid );
-
-		foreach ( @krbGetUsrLst ) {
-
-			if ( $_ eq $uname ) { print $_; last; }
-		}
-
-		print "\n";
-	}
-}
-
-
 sub listLdpGrpIDs {
 
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
 	genDetAth;
 
 	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
@@ -2087,7 +2288,7 @@ sub listLdpGrpIDs {
 	
 	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
 	
-	@ldpGetPgrLst = sort { $a->[1] cmp $b->[1] } @ldpGetPgrLst;
+	@ldpGetPgrLst = sort { $a->[1] <=> $b->[1] } @ldpGetPgrLst;
 
 	my @afsGetAidLst = afsGetAid ( $AFSPTS );
 
@@ -2120,7 +2321,58 @@ sub listLdpGrpIDs {
 }
 
 
+sub listAfsAccIDs {
+
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
+	genDetAth;
+
+	my @krbGetUsrLst = krbGetUsr ( $KADMIN );
+
+	my @ldpGetPacLst = ldpGetPac ( $LDAP { search } );
+	
+	my @ldpGetPgrLst = ldpGetPgr ( $LDAP { search } );
+	
+	my @afsGetAidLst = afsGetAid ( $AFSPTS );
+
+	@afsGetAidLst = sort { $a->[1] <=> $b->[1] } @afsGetAidLst;
+
+	printf "%-${CW}s%-${CW}s%-${CW}s%-${CW}s%0s\n", $AAI, $AAN, $LAN, $LGN, $KAN;
+
+	my $x = 0; while ( $x < ( 4 * $CW + length( $KAN ) ) ) { print "-"; $x++; } print "\n";
+
+	foreach ( @afsGetAidLst ) {
+
+		my ( $uid, $uname );
+
+		foreach ( @$_ ) {
+
+			if ( /\d+/ ) { $uid = $_; } else { $uname = $_; }
+		}
+
+		printf "%-${CW}s%-${CW}s", $uid, $uname;
+
+		matchPrnMidColName ( \@ldpGetPacLst, $uid );
+
+		matchPrnMidColName ( \@ldpGetPgrLst, $uid );
+
+		foreach ( @krbGetUsrLst ) {
+
+			if ( $_ eq $uname ) { print $_; last; }
+		}
+
+		print "\n";
+	}
+}
+
+
 sub listAllNames {
+
+	genDetExe ( $WHICH, $KADMIN );
+
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
 
 	genDetAth;
 
@@ -2134,11 +2386,13 @@ sub listAllNames {
 
 sub listAllIDs {
 
+	genDetExe ( $WHICH, $LDAP { search } ) if ( $OPENLDAP eq "enabled" );
+
 	genDetAth;
 
 	my @genGetIdsLst = genGetIds;
 
-	@genGetIdsLst = sort ( @genGetIdsLst );
+	@genGetIdsLst = sort { $a <=> $b }  @genGetIdsLst;
 
 	foreach ( @genGetIdsLst ) { print "$_\n"; }
 }

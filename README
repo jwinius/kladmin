@@ -1,4 +1,4 @@
-                            kladmin v0.2
+                            kladmin v0.2.1
                  'magic trio' user administration tool
 
 
@@ -239,7 +239,7 @@ Example of a list of names in an input file, each with a valid format:
 
 A configuration file, /etc/kladmin.conf, must be created. A number of variables 
 must be configured, while others have default values. What follows is a complete 
-list of variables for v0.2 of the configuration file, any which may be altered 
+list of variables for v0.2.1 of the configuration file, any which may be altered 
 as needed:
 
 OPENLDAP
@@ -261,6 +261,9 @@ KRBOPT	Attributes to give Kerberos user accounts The default is "-clearpolicy
 
 IDMIN	Minimum UID/GID number to use for LDAP and AFS accounts. The default is 
 	10000.
+
+IDMAX	Maximum UID/GID number to use for LDAP and AFS accounts. The default is 
+	65535, which is also the highest value possible.
 
 LDPADMIN	
 	DN, or partial DN, required for LDAP administrative access. *Required*
